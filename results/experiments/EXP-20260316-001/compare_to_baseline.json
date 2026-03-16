@@ -1,0 +1,11 @@
+{
+  "baseline_experiment_id": "",
+  "baseline_type": "",
+  "comparison_scope": "same workload + same hardware + same seed family",
+  "delta_ttft_p95_pct": 0,
+  "delta_tpot_p95_pct": 0,
+  "delta_throughput_pct": 0,
+  "delta_goodput_pct": 0,
+  "delta_gpu_mem_peak_pct": 0,
+  "result_label": "neutral"
+}

@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Compare To Baseline",
+  "type": "object",
+  "required": ["baseline_experiment_id", "result_label"],
+  "properties": {
+    "baseline_experiment_id": {"type": "string"},
+    "baseline_type": {"type": "string"},
+    "comparison_scope": {"type": "string"},
+    "delta_ttft_p95_pct": {"type": "number"},
+    "delta_tpot_p95_pct": {"type": "number"},
+    "delta_throughput_pct": {"type": "number"},
+    "delta_goodput_pct": {"type": "number"},
+    "delta_gpu_mem_peak_pct": {"type": "number"},
+    "result_label": {
+      "type": "string",
+      "enum": ["win", "partial_win", "neutral", "regression", "invalid"]
+    }
+  },
+  "additionalProperties": true
+}

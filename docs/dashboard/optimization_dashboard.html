@@ -1,0 +1,132 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Optimization Dashboard</title>
+  <style>
+    body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; margin: 24px; color: #1f2937; background: linear-gradient(135deg, #f4f7fb, #eef7f2); }
+    h1 { margin-top: 0; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+    .card { background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.03); }
+    .panel { background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 16px; margin-top: 16px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { border: 1px solid #e5e7eb; padding: 6px 8px; text-align: left; }
+    th { background: #f9fafb; }
+    .muted { color: #6b7280; font-size: 12px; }
+    #trend { width: 100%; height: 360px; }
+    .legend span { margin-right: 10px; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>Optimization Dashboard</h1>
+  <p class="muted">Generated at: 2026-03-16T15:00:31</p>
+
+  <div class="panel">
+    <h2>A. 当前最优结果卡片</h2>
+    <div class="grid"><div class='card'><h3>Best TTFT</h3><p>No data</p></div><div class='card'><h3>Best TPOT</h3><p>No data</p></div><div class='card'><h3>Best Throughput</h3><p>No data</p></div><div class='card'><h3>Best Goodput</h3><p>No data</p></div></div>
+  </div>
+
+  <div class="panel">
+    <h2>B. 主指标趋势图</h2>
+    <canvas id="trend"></canvas>
+    <div class="legend">
+      <span style="color:#1d4ed8">TTFT p50</span>
+      <span style="color:#1e40af">TTFT p95</span>
+      <span style="color:#b91c1c">TPOT p50</span>
+      <span style="color:#7f1d1d">TPOT p95</span>
+      <span style="color:#047857">throughput</span>
+      <span style="color:#065f46">goodput</span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>C. 实验结论分布</h2>
+    <ul><li>No data</li></ul>
+  </div>
+
+  <div class="panel">
+    <h2>D. 模块贡献分布</h2>
+    <ul><li>No data</li></ul>
+  </div>
+
+  <div class="panel">
+    <h2>E. 当前推荐配置</h2>
+    No recommendation yet
+  </div>
+
+  <div class="panel">
+    <h2>F. 当前主要问题</h2>
+    <ol><li>暂无显著阻塞项，请继续扩充 workload 覆盖</li></ol>
+  </div>
+
+  <div class="panel">
+    <h2>实验台账（最近）</h2>
+    <table><thead><tr><th>experiment_id</th><th>date</th><th>optimization_module</th><th>workload_profile</th><th>ttft_p95_ms</th><th>tpot_p95_ms</th><th>throughput_tok_per_s</th><th>goodput</th><th>result_label</th><th>score_main</th><th>is_merge_candidate</th></tr></thead><tbody></tbody></table>
+  </div>
+
+  <script>
+    const trendData = [];
+    const canvas = document.getElementById('trend');
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width = canvas.clientWidth * devicePixelRatio;
+    const H = canvas.height = canvas.clientHeight * devicePixelRatio;
+    ctx.scale(devicePixelRatio, devicePixelRatio);
+
+    const pad = 36;
+    const cw = canvas.clientWidth;
+    const ch = canvas.clientHeight;
+
+    function series(name) {
+      return trendData.map((d, i) => ({x: i, y: d[name]})).filter(p => p.y !== null && !Number.isNaN(p.y));
+    }
+
+    const metrics = [
+      ['ttft_p50_ms', '#1d4ed8'],
+      ['ttft_p95_ms', '#1e40af'],
+      ['tpot_p50_ms', '#b91c1c'],
+      ['tpot_p95_ms', '#7f1d1d'],
+      ['throughput_tok_per_s', '#047857'],
+      ['goodput', '#065f46'],
+    ];
+
+    let vals = [];
+    for (const [m] of metrics) {
+      vals = vals.concat(series(m).map(p => p.y));
+    }
+    const minY = vals.length ? Math.min(...vals) : 0;
+    const maxY = vals.length ? Math.max(...vals) : 1;
+
+    function tx(i) {
+      if (trendData.length <= 1) return pad;
+      return pad + (i / (trendData.length - 1)) * (cw - 2 * pad);
+    }
+    function ty(v) {
+      if (maxY === minY) return ch / 2;
+      return ch - pad - ((v - minY) / (maxY - minY)) * (ch - 2 * pad);
+    }
+
+    ctx.strokeStyle = '#d1d5db';
+    ctx.beginPath();
+    ctx.moveTo(pad, pad);
+    ctx.lineTo(pad, ch - pad);
+    ctx.lineTo(cw - pad, ch - pad);
+    ctx.stroke();
+
+    for (const [m, color] of metrics) {
+      const s = series(m);
+      if (!s.length) continue;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.8;
+      ctx.beginPath();
+      s.forEach((p, idx) => {
+        const x = tx(p.x);
+        const y = ty(p.y);
+        if (idx === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+    }
+  </script>
+</body>
+</html>

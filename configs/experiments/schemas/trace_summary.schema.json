@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Trace Summary",
+  "type": "object",
+  "properties": {
+    "experiment_id": {"type": "string"},
+    "acceptance": {"type": "object"},
+    "prefetch": {"type": "object"},
+    "memory": {"type": "object"},
+    "moe": {"type": "object"}
+  },
+  "additionalProperties": true
+}

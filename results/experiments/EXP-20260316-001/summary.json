@@ -1,0 +1,31 @@
+{
+  "experiment_id": "EXP-20260316-001",
+  "metrics": {
+    "ttft_p50_ms": 0,
+    "ttft_p95_ms": 0,
+    "tpot_p50_ms": 0,
+    "tpot_p95_ms": 0,
+    "itl_mean_ms": 0,
+    "throughput_tok_per_s": 0,
+    "goodput": 0,
+    "acceptance_rate_mean": 0,
+    "accepted_tokens": 0,
+    "proposed_tokens": 0,
+    "rejected_tokens": 0,
+    "expert_cache_hit_rate": 0,
+    "wasted_prefetched_bytes": 0,
+    "gpu_mem_peak_mb": 0,
+    "kv_cache_peak_mb": 0,
+    "speculative_budget_mb": 0,
+    "expert_budget_mb": 0
+  },
+  "stability": {
+    "oom_count": 0,
+    "fallback_count": 0,
+    "run_success_rate": 1.0
+  },
+  "result_label": "neutral",
+  "primary_gain": "",
+  "primary_cost": "",
+  "final_conclusion": ""
+}

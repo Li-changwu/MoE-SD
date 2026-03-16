@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.env
+
+# Build
+build/
+dist/
+*.egg-info/
+
+# Results
+results/raw/*
+results/parsed/*
+results/figures/*
+
+# Exceptions: keep directory structure
+!results/raw/.gitkeep
+!results/parsed/.gitkeep
+!results/figures/.gitkeep
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
