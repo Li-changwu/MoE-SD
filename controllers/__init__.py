@@ -6,6 +6,7 @@ from .interface import (
 	SchedulerController,
 	build_decision_trace,
 )
+from .static_governor import StaticGovernor, StaticGovernorConfig
 
 __all__ = [
 	"SchedulerController",
@@ -14,4 +15,6 @@ __all__ = [
 	"RequestState",
 	"RuntimeState",
 	"build_decision_trace",
+	"StaticGovernor",
+	"StaticGovernorConfig",
 ]

@@ -4,7 +4,7 @@
 <!-- AUTO_DASHBOARD_START -->
 ## Optimization Dashboard Snapshot
 
-Updated: 2026-03-16 20:02 UTC  
+Updated: 2026-03-16 20:08 UTC  
 Dashboard HTML: [docs/dashboard/optimization_dashboard.html](docs/dashboard/optimization_dashboard.html)
 
 ### A. 当前最优结果卡片
@@ -179,6 +179,7 @@ It updates README on:
 - `docs/controller_interface.md`: frozen scheduler controller interface
 - `docs/state_schema.yaml`: request/phase/step state schema
 - `docs/decision_trace_schema.yaml`: decision trace schema
+- `docs/static_governor_v0.md`: static governor v0 rules and outputs
 
 ## Package Runtime Entry
 

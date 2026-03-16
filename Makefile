@@ -66,6 +66,7 @@ help:
 	@echo "  dashboard-build       Build optimization dashboard and regression table"
 	@echo "  dashboard-readme      Refresh README dashboard snapshot"
 	@echo "  dashboard-refresh     Parse raw results + sync registry + refresh dashboard"
+	@echo "  dashboard-validate    Validate registry/readme/html quality gates"
 	@echo "  clean-results         Remove generated results"
 
 .PHONY: init-layout
@@ -273,8 +274,20 @@ dashboard-readme:
 .PHONY: update-readme-dashboard
 update-readme-dashboard: dashboard-readme
 
+REQUIRED_METHODS ?= no_sd,eagle3
+MIN_VALID_ROWS ?= 2
+
+.PHONY: dashboard-validate
+dashboard-validate:
+	$(PYTHON) tools/validate_dashboard_refresh.py \
+		--registry-csv $(RESULTS_DIR)/registry/experiment_registry.csv \
+		--readme README.md \
+		--dashboard-html docs/dashboard/optimization_dashboard.html \
+		--min-valid-rows $(MIN_VALID_ROWS) \
+		--required-methods $(REQUIRED_METHODS)
+
 .PHONY: dashboard-refresh
-dashboard-refresh: parse-results sync-registry dashboard-readme
+dashboard-refresh: parse-results sync-registry dashboard-readme dashboard-validate
 
 .PHONY: clean-results
 clean-results:

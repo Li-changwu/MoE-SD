@@ -51,6 +51,15 @@ jobs:
             --readme README.md \
             --dashboard-rel-path docs/dashboard/optimization_dashboard.html
 
+      - name: Validate dashboard artifacts
+        run: |
+          python tools/validate_dashboard_refresh.py \
+            --registry-csv results/registry/experiment_registry.csv \
+            --readme README.md \
+            --dashboard-html docs/dashboard/optimization_dashboard.html \
+            --min-valid-rows 2 \
+            --required-methods no_sd,eagle3
+
       - name: Commit changes
         run: |
           if git diff --quiet; then
