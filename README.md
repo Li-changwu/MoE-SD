@@ -4,36 +4,37 @@
 <!-- AUTO_DASHBOARD_START -->
 ## Optimization Dashboard Snapshot
 
-Updated: 2026-03-16 19:45 UTC  
+Updated: 2026-03-16 19:55 UTC  
 Dashboard HTML: [docs/dashboard/optimization_dashboard.html](docs/dashboard/optimization_dashboard.html)
 
 ### A. 当前最优结果卡片
-- **Best TTFT**: EXP-20260316-001 | ttft_p95_ms=0 | delta=+0.00% | method= | policy=
-- **Best TPOT**: EXP-20260316-001 | tpot_p95_ms=0 | delta=+0.00% | method= | policy=
-- **Best Throughput**: EXP-20260316-001 | throughput_tok_per_s=0 | delta=+0.00% | method= | policy=
-- **Best Goodput**: EXP-20260316-001 | goodput=0 | delta=+0.00% | method= | policy=
+- **Best TTFT**: AUTO-CD38E89FCC | ttft_p95_ms=15475.566118224524 | delta=n/a | method= | policy=baseline
+- **Best TPOT**: AUTO-CD38E89FCC | tpot_p95_ms=788.2997422005117 | delta=n/a | method= | policy=baseline
+- **Best Throughput**: AUTO-CD38E89FCC | throughput_tok_per_s=8.174784865868432 | delta=n/a | method= | policy=baseline
+- **Best Goodput**: n/a
 
 ### C. 实验结论分布
-- neutral: 1
+- neutral: 2
 
 ### D. 模块贡献分布
-- unknown: 1
+- baseline: 2
 
 ### E. 当前推荐配置
-- config:  + 
-- workload_scope: 
+- config: eagle3 + baseline
+- workload_scope: qps1.0_n8
 - risk: n/a
 - score_main: 0.0
 - is_merge_candidate: false
 
 ### F. 当前主要问题
-1. 暂无明显阻塞，建议扩展 workload 覆盖后再判断
+1. Long prompt workload 下 TTFT p95 偏高
 
 ### 最近实验台账
 
 | experiment_id | date | module | workload | ttft_p95_ms | tpot_p95_ms | throughput | goodput | result_label | score_main | merge_candidate |
 | --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- | ---: | --- |
-| EXP-20260316-001 | 2026-03-16 |  |  | 0 | 0 | 0 | 0 | neutral | 0.0 | false |
+| AUTO-CD38E89FCC | 2026-03-16 | baseline | qps1.0_n8 | 15475.566118224524 | 788.2997422005117 | 8.174784865868432 |  | neutral | 0.0 | false |
+| AUTO-7DB5BD009B | 2026-03-16 | baseline | qps1.0_n8 | 18305.469982007053 | 992.7760795670902 | 6.042344974098638 |  | neutral | 0.0 | false |
 <!-- AUTO_DASHBOARD_END -->
 
 A plugin-style scheduling framework for memory-constrained MoE inference with speculative decoding on top of vLLM.
@@ -137,6 +138,9 @@ See docs/experiment_decision_board.md for full schema and policy.
 ```bash
 # local refresh: regenerate dashboard + update README snapshot block
 make dashboard-readme
+
+# one-command refresh: parse raw bench results, sync registry, rebuild dashboard
+make dashboard-refresh
 ```
 
 ### 11. Run observability collectors
@@ -168,6 +172,16 @@ It updates README on:
 - `docs/acceptance_report.md`: acceptance collector output contract
 - `docs/moe_trace_report.md`: MoE trace collector output contract
 - `docs/memory_breakdown.md`: memory decomposition output contract
+- `docs/integration_boundary.md`: plugin/adapter/patch boundary and rollout rules
+- `docs/config_protocol.md`: scheduler config and feature-flag contract
+
+## Package Runtime Entry
+
+After `make install-dev`, you can inspect runtime mode quickly:
+
+```bash
+moe-sd-runtime --config-json '{"model":"Qwen/Qwen3-30B-A3B-Instruct-2507","workload_profile":"online_medium","feature_flags":{"enable_controller":false}}'
+```
 
 ## Research roadmap
 
