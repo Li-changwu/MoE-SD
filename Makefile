@@ -42,9 +42,13 @@ help:
 	@echo "Available targets:"
 	@echo "  init-layout           Initialize repository layout"
 	@echo "  install-dev           Install editable package"
+	@echo "  bootstrap-env         Create venv, install dependencies, dump env report"
 	@echo "  bootstrap-issues      Create GitHub labels/milestones/issues"
 	@echo "  run-server-no-sd      Start vLLM server without speculative decoding"
 	@echo "  run-server-eagle3     Start vLLM server with EAGLE-3"
+	@echo "  run-baseline-no-sd    Run no-SD baseline chain"
+	@echo "  run-baseline-eagle3   Run EAGLE-3 baseline chain"
+	@echo "  run-bench             Run benchmark from CONFIG file"
 	@echo "  bench-serve-no-sd     Run vllm bench serve for no-SD baseline"
 	@echo "  bench-serve-eagle3    Run vllm bench serve for EAGLE-3 baseline"
 	@echo "  bench-latency-no-sd   Run vllm bench latency for no-SD baseline"
@@ -55,8 +59,8 @@ help:
 	@echo "  init-registry         Initialize experiment registry"
 	@echo "  scaffold-exp          Create one standard experiment directory"
 	@echo "  append-exp            Upsert one experiment into registry"
-	@echo "  build-dashboard       Build optimization dashboard and regression table"
-	@echo "  update-readme-dashboard Refresh README dashboard snapshot"
+	@echo "  dashboard-build       Build optimization dashboard and regression table"
+	@echo "  dashboard-readme      Refresh README dashboard snapshot"
 	@echo "  clean-results         Remove generated results"
 
 .PHONY: init-layout
@@ -66,6 +70,10 @@ init-layout:
 .PHONY: install-dev
 install-dev:
 	$(PIP) install -e .
+
+.PHONY: bootstrap-env
+bootstrap-env:
+	bash scripts/bootstrap.sh
 
 .PHONY: bootstrap-issues
 bootstrap-issues:
@@ -166,6 +174,21 @@ bench-throughput-eagle3:
 		--save-result \
 		--result-dir $(RESULTS_DIR)/raw/eagle3_throughput
 
+CONFIG ?=
+
+.PHONY: run-bench
+run-bench:
+	@if [ -z "$(CONFIG)" ]; then echo "CONFIG is required, e.g. make run-bench CONFIG=configs/experiments/baseline_no_sd.yaml"; exit 1; fi
+	bash scripts/run_bench.sh "$(CONFIG)"
+
+.PHONY: run-baseline-no-sd
+run-baseline-no-sd:
+	bash scripts/run_baseline_no_sd.sh
+
+.PHONY: run-baseline-eagle3
+run-baseline-eagle3:
+	bash scripts/run_baseline_eagle3.sh
+
 .PHONY: parse-results
 parse-results:
 	$(PYTHON) tools/parse_bench_results.py --input-dir $(RESULTS_DIR)/raw --output-dir $(RESULTS_DIR)/parsed
@@ -195,15 +218,18 @@ append-exp:
 		--exp-dir $(EXP_DIR) \
 		--registry-csv $(RESULTS_DIR)/registry/experiment_registry.csv
 
-.PHONY: build-dashboard
-build-dashboard:
+.PHONY: dashboard-build
+dashboard-build:
 	$(PYTHON) tools/build_decision_dashboard.py \
 		--registry-csv $(RESULTS_DIR)/registry/experiment_registry.csv \
 		--output-html $(RESULTS_DIR)/figures/optimization_dashboard.html \
 		--regression-csv $(RESULTS_DIR)/parsed/regression_stability.csv
 
-.PHONY: update-readme-dashboard
-update-readme-dashboard:
+.PHONY: build-dashboard
+build-dashboard: dashboard-build
+
+.PHONY: dashboard-readme
+dashboard-readme:
 	$(PYTHON) tools/build_decision_dashboard.py \
 		--registry-csv $(RESULTS_DIR)/registry/experiment_registry.csv \
 		--output-html docs/dashboard/optimization_dashboard.html \
@@ -212,6 +238,9 @@ update-readme-dashboard:
 		--registry-csv $(RESULTS_DIR)/registry/experiment_registry.csv \
 		--readme README.md \
 		--dashboard-rel-path docs/dashboard/optimization_dashboard.html
+
+.PHONY: update-readme-dashboard
+update-readme-dashboard: dashboard-readme
 
 .PHONY: clean-results
 clean-results:

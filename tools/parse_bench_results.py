@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 def collect_json_files(input_dir: Path):
-    return list(input_dir.rglob("*.json"))
+    return [p for p in input_dir.rglob("*.json") if p.name != "metadata.json"]
 
 
 def safe_get(d, *keys, default=None):
@@ -21,11 +21,25 @@ def parse_file(fp: Path):
     with fp.open("r", encoding="utf-8") as f:
         data = json.load(f)
 
+    metadata_path = fp.parent / "metadata.json"
+    metadata = {}
+    if metadata_path.exists():
+        with metadata_path.open("r", encoding="utf-8") as f:
+            metadata = json.load(f)
+
     row = {
         "file": str(fp),
-        "model": data.get("model"),
-        "num_prompts": data.get("num_prompts"),
-        "request_rate": data.get("request_rate"),
+        "model": metadata.get("model", data.get("model")),
+        "method": metadata.get("method"),
+        "workload_profile": metadata.get("workload_profile"),
+        "mode": metadata.get("mode"),
+        "seed": metadata.get("seed"),
+        "git_commit": metadata.get("git_commit"),
+        "config_hash": metadata.get("config_hash"),
+        "num_prompts": metadata.get("num_prompts", data.get("num_prompts")),
+        "request_rate": metadata.get("request_rate", data.get("request_rate")),
+        "prompt_len": metadata.get("prompt_len"),
+        "output_len": metadata.get("output_len"),
         "mean_ttft_ms": safe_get(data, "ttft", "mean"),
         "p50_ttft_ms": safe_get(data, "ttft", "p50"),
         "p95_ttft_ms": safe_get(data, "ttft", "p95"),
@@ -54,8 +68,8 @@ def main():
 
     out_csv = output_dir / "summary.csv"
     with out_csv.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()) if rows else [])
         if rows:
+            writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
             writer.writeheader()
             writer.writerows(rows)
 

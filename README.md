@@ -76,37 +76,45 @@ make init-layout
 make install-dev
 ```
 
-### 3. Start vLLM server without speculative decoding
+### 3. Bootstrap reproducible environment
+
+```bash
+make bootstrap-env
+```
+
+This will create `.venv`, install dependencies, and write `docs/env_report.txt`.
+
+### 4. Start vLLM server without speculative decoding
 
 ```bash
 make run-server-no-sd
 ```
 
-### 4. Benchmark no-SD baseline
+### 5. Benchmark no-SD baseline
 
 ```bash
-make bench-serve-no-sd
+make run-baseline-no-sd
 ```
 
-### 5. Start vLLM server with EAGLE-3
+### 6. Start vLLM server with EAGLE-3
 
 ```bash
 make run-server-eagle3
 ```
 
-### 6. Benchmark EAGLE-3 baseline
+### 7. Benchmark EAGLE-3 baseline
 
 ```bash
-make bench-serve-eagle3
+make run-baseline-eagle3
 ```
 
-### 7. Parse benchmark results
+### 8. Run benchmark from config
 
 ```bash
-make parse-results
+make run-bench CONFIG=configs/experiments/baseline_no_sd.yaml
 ```
 
-### 8. Build experiment decision board
+### 9. Build experiment decision board
 
 ```bash
 # initialize registry once
@@ -119,16 +127,16 @@ make scaffold-exp EXP_ID=EXP-20260316-001 OWNER=sage ISSUE_ID=MOESD-001
 make append-exp EXP_DIR=results/experiments/EXP-20260316-001
 
 # generate overview dashboard + regression table
-make build-dashboard
+make dashboard-build
 ```
 
 See docs/experiment_decision_board.md for full schema and policy.
 
-### 9. Refresh dashboard on README
+### 10. Refresh dashboard on README
 
 ```bash
 # local refresh: regenerate dashboard + update README snapshot block
-make update-readme-dashboard
+make dashboard-readme
 ```
 
 The repository also includes an auto-refresh workflow:
@@ -140,6 +148,15 @@ It updates README on:
 - push to experiment registry or experiment outputs
 - manual workflow dispatch
 - schedule (every 30 minutes)
+
+## Reproducibility Docs
+
+- `docs/version_matrix.md`: frozen environment matrix
+- `docs/workload_matrix.md`: frozen workload profiles
+- `docs/benchmark_contract.md`: benchmark metric/output contract
+- `docs/make_targets.md`: standardized make entrypoints
+- `docs/result_naming_convention.md`: result path + metadata contract
+- `docs/issue_execution_plan.md`: issue execution waves and policy
 
 ## Research roadmap
 

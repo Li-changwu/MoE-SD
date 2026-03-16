@@ -1,0 +1,9 @@
+name: online_medium
+benchmark_modes: [serve, latency, throughput]
+prompt_len: 512
+output_len: 128
+request_rate: 2
+memory_pressure: medium
+sampling: deterministic
+k_candidates: [1, 2, 4, 8]
+seed: 42

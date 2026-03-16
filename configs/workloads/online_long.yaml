@@ -1,0 +1,9 @@
+name: online_long
+benchmark_modes: [serve, latency]
+prompt_len: 2048
+output_len: 256
+request_rate: 1
+memory_pressure: tight
+sampling: sampled
+k_candidates: [1, 2, 4]
+seed: 42
