@@ -181,6 +181,7 @@ It updates README on:
 - `docs/decision_trace_schema.yaml`: decision trace schema
 - `docs/static_governor_v0.md`: static governor v0 rules and outputs
 - `docs/phase_aware_design.md`: phase-aware governor v1 design and rules
+- `docs/fallback_policy.md`: fallback and hot-switch policy
 
 ## Package Runtime Entry
 
