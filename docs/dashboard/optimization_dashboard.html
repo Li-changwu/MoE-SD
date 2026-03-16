@@ -20,16 +20,11 @@
 </head>
 <body>
   <h1>Optimization Dashboard</h1>
-  <p class="muted">Generated at: 2026-03-16T15:35:30 (local runs integrated)</p>
+  <p class="muted">Generated at: 2026-03-16T15:45:12</p>
 
   <div class="panel">
     <h2>A. 当前最优结果卡片</h2>
-    <div class="grid">
-      <div class='card'><h3>Best TTFT</h3><p>12983.13 ms (no_sd)</p></div>
-      <div class='card'><h3>Best TPOT</h3><p>702.03 ms (no_sd)</p></div>
-      <div class='card'><h3>Best Throughput</h3><p>8.17 tok/s (no_sd)</p></div>
-      <div class='card'><h3>Best Goodput</h3><p>N/A (bench JSON goodput missing)</p></div>
-    </div>
+    <div class="grid"><div class='card'><h3>Best TTFT</h3><p>No data</p></div><div class='card'><h3>Best TPOT</h3><p>No data</p></div><div class='card'><h3>Best Throughput</h3><p>No data</p></div><div class='card'><h3>Best Goodput</h3><p>No data</p></div></div>
   </div>
 
   <div class="panel">
@@ -47,73 +42,31 @@
 
   <div class="panel">
     <h2>C. 实验结论分布</h2>
-    <ul>
-      <li>在 46GB 单卡 + offloading 条件下，no-SD 与 EAGLE-3 都已跑通 serve benchmark。</li>
-      <li>当前 workload (input=256, output=64, qps=1) 下，no-SD 指标优于 EAGLE-3。</li>
-      <li>EAGLE-3 可启动，但对显存预算更敏感，参数窗口更窄。</li>
-    </ul>
+    <ul><li>No data</li></ul>
   </div>
 
   <div class="panel">
     <h2>D. 模块贡献分布</h2>
-    <ul>
-      <li>offloading：使 30B MoE 在单卡上可加载并完成基准。</li>
-      <li>本地模型路径：避免远程下载不稳定导致的启动失败。</li>
-      <li>eagle3 speculator：可与 target 同机加载，但会挤压 KV cache 空间。</li>
-    </ul>
+    <ul><li>No data</li></ul>
   </div>
 
   <div class="panel">
     <h2>E. 当前推荐配置</h2>
-    推荐先使用 no-SD 基线进行大规模 workload 扫描，再在子集 workload 上评估 EAGLE-3。<br/>
-    建议启动参数：<br/>
-    - MAX_MODEL_LEN=512<br/>
-    - CPU_OFFLOAD_GB=30<br/>
-    - SWAP_SPACE_GB=64<br/>
-    - EAGLE-3 额外使用 SPEC_TOKENS=2 并启用本地 speculator 目录
+    No recommendation yet
   </div>
 
   <div class="panel">
     <h2>F. 当前主要问题</h2>
-    <ol>
-      <li>EAGLE-3 在显存紧张时容易出现 KV cache 可用空间不足。</li>
-      <li>当前 bench 产物缺少 goodput 字段，需在后处理阶段单独补算。</li>
-      <li>需要继续扩展 workload profile（prompt/output/rate）验证结论稳健性。</li>
-    </ol>
+    <ol><li>暂无显著阻塞项，请继续扩充 workload 覆盖</li></ol>
   </div>
 
   <div class="panel">
     <h2>实验台账（最近）</h2>
-    <table><thead><tr><th>experiment_id</th><th>date</th><th>optimization_module</th><th>workload_profile</th><th>ttft_p95_ms</th><th>tpot_p95_ms</th><th>throughput_tok_per_s</th><th>goodput</th><th>result_label</th><th>score_main</th><th>is_merge_candidate</th></tr></thead><tbody>
-      <tr><td>exp-20260316-144538</td><td>2026-03-16</td><td>no_sd</td><td>rand_256_64_qps1</td><td>0.00</td><td>0.00</td><td>0.00</td><td>N/A</td><td>failed_startup</td><td>0.000</td><td>no</td></tr>
-      <tr><td>exp-20260316-151916</td><td>2026-03-16</td><td>no_sd+offload</td><td>rand_256_64_qps1</td><td>15475.57</td><td>788.30</td><td>8.17</td><td>N/A</td><td>stable_baseline</td><td>0.001</td><td>yes</td></tr>
-      <tr><td>exp-20260316-153439</td><td>2026-03-16</td><td>eagle3+offload</td><td>rand_256_64_qps1</td><td>18305.47</td><td>992.78</td><td>6.04</td><td>N/A</td><td>stable_spec</td><td>0.001</td><td>no</td></tr>
-    </tbody></table>
+    <table><thead><tr><th>experiment_id</th><th>date</th><th>optimization_module</th><th>workload_profile</th><th>ttft_p95_ms</th><th>tpot_p95_ms</th><th>throughput_tok_per_s</th><th>goodput</th><th>result_label</th><th>score_main</th><th>is_merge_candidate</th></tr></thead><tbody></tbody></table>
   </div>
 
   <script>
-    const trendData = [
-      {
-        experiment_id: 'exp-20260316-151916',
-        module: 'no_sd+offload',
-        ttft_p50_ms: 13126.03,
-        ttft_p95_ms: 15475.57,
-        tpot_p50_ms: 692.50,
-        tpot_p95_ms: 788.30,
-        throughput_tok_per_s: 8.17,
-        goodput: null,
-      },
-      {
-        experiment_id: 'exp-20260316-153439',
-        module: 'eagle3+offload',
-        ttft_p50_ms: 16061.79,
-        ttft_p95_ms: 18305.47,
-        tpot_p50_ms: 893.06,
-        tpot_p95_ms: 992.78,
-        throughput_tok_per_s: 6.04,
-        goodput: null,
-      },
-    ];
+    const trendData = [];
     const canvas = document.getElementById('trend');
     const ctx = canvas.getContext('2d');
     const W = canvas.width = canvas.clientWidth * devicePixelRatio;
