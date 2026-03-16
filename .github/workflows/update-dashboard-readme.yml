@@ -5,7 +5,11 @@ on:
   push:
     paths:
       - "results/registry/experiment_registry.csv"
+      - "results/raw/**"
+      - "results/parsed/summary.csv"
       - "results/experiments/**"
+      - "tools/sync_registry_from_summary.py"
+      - "tools/parse_bench_results.py"
       - "tools/build_decision_dashboard.py"
       - "tools/update_readme_dashboard.py"
       - ".github/workflows/update-dashboard-readme.yml"
@@ -29,6 +33,12 @@ jobs:
 
       - name: Build dashboard artifacts
         run: |
+          python tools/parse_bench_results.py \
+            --input-dir results/raw \
+            --output-dir results/parsed
+          python tools/sync_registry_from_summary.py \
+            --summary-csv results/parsed/summary.csv \
+            --registry-csv results/registry/experiment_registry.csv
           python tools/build_decision_dashboard.py \
             --registry-csv results/registry/experiment_registry.csv \
             --output-html docs/dashboard/optimization_dashboard.html \
@@ -49,6 +59,6 @@ jobs:
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add README.md docs/dashboard/optimization_dashboard.html results/parsed/regression_stability.csv
+          git add README.md docs/dashboard/optimization_dashboard.html results/parsed/regression_stability.csv results/parsed/summary.csv results/registry/experiment_registry.csv
           git commit -m "chore(dashboard): auto-update README snapshot"
           git push

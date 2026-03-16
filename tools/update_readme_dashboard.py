@@ -30,7 +30,8 @@ def valid_rows(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
     for r in rows:
         status = (r.get("status") or "").lower()
         label = (r.get("result_label") or "").lower()
-        if status in {"done", "running", "planned"} and label != "invalid":
+        has_signal = any((to_float(r.get(k)) or 0) > 0 for k in ["ttft_p95_ms", "tpot_p95_ms", "throughput_tok_per_s", "goodput"])
+        if status in {"done", "running"} and label != "invalid" and has_signal:
             out.append(r)
     return out
 

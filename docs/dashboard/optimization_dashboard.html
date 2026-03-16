@@ -20,11 +20,11 @@
 </head>
 <body>
   <h1>Optimization Dashboard</h1>
-  <p class="muted">Generated at: 2026-03-16T15:45:12</p>
+  <p class="muted">Generated at: 2026-03-16T15:58:32</p>
 
   <div class="panel">
     <h2>A. 当前最优结果卡片</h2>
-    <div class="grid"><div class='card'><h3>Best TTFT</h3><p>No data</p></div><div class='card'><h3>Best TPOT</h3><p>No data</p></div><div class='card'><h3>Best Throughput</h3><p>No data</p></div><div class='card'><h3>Best Goodput</h3><p>No data</p></div></div>
+    <div class="grid"><div class='card'><h3>Best TTFT</h3><p><b>Method:</b> </p><p><b>Config:</b> policy=baseline; module=baseline</p><p><b>Value:</b> 15475.566118224524</p><p><b>Delta vs baseline:</b> %</p><p><b>Workload:</b> qps1.0_n8</p><p><b>Updated:</b> 2026-03-16T15:58:32</p></div><div class='card'><h3>Best TPOT</h3><p><b>Method:</b> </p><p><b>Config:</b> policy=baseline; module=baseline</p><p><b>Value:</b> 788.2997422005117</p><p><b>Delta vs baseline:</b> %</p><p><b>Workload:</b> qps1.0_n8</p><p><b>Updated:</b> 2026-03-16T15:58:32</p></div><div class='card'><h3>Best Throughput</h3><p><b>Method:</b> </p><p><b>Config:</b> policy=baseline; module=baseline</p><p><b>Value:</b> 8.174784865868432</p><p><b>Delta vs baseline:</b> %</p><p><b>Workload:</b> qps1.0_n8</p><p><b>Updated:</b> 2026-03-16T15:58:32</p></div><div class='card'><h3>Best Goodput</h3><p>No data</p></div></div>
   </div>
 
   <div class="panel">
@@ -42,31 +42,31 @@
 
   <div class="panel">
     <h2>C. 实验结论分布</h2>
-    <ul><li>No data</li></ul>
+    <ul><li>neutral: 2</li></ul>
   </div>
 
   <div class="panel">
     <h2>D. 模块贡献分布</h2>
-    <ul><li>No data</li></ul>
+    <ul><li>baseline: 2</li></ul>
   </div>
 
   <div class="panel">
     <h2>E. 当前推荐配置</h2>
-    No recommendation yet
+    <p><b>配置:</b> eagle3 + baseline</p><p><b>Scope:</b> qps1.0_n8</p><p><b>Risk:</b> </p><p><b>score_main:</b> 0.0</p><p><b>merge candidate:</b> false</p>
   </div>
 
   <div class="panel">
     <h2>F. 当前主要问题</h2>
-    <ol><li>暂无显著阻塞项，请继续扩充 workload 覆盖</li></ol>
+    <ol><li>Long prompt workload 下 TTFT p95 仍偏高</li></ol>
   </div>
 
   <div class="panel">
     <h2>实验台账（最近）</h2>
-    <table><thead><tr><th>experiment_id</th><th>date</th><th>optimization_module</th><th>workload_profile</th><th>ttft_p95_ms</th><th>tpot_p95_ms</th><th>throughput_tok_per_s</th><th>goodput</th><th>result_label</th><th>score_main</th><th>is_merge_candidate</th></tr></thead><tbody></tbody></table>
+    <table><thead><tr><th>experiment_id</th><th>date</th><th>optimization_module</th><th>workload_profile</th><th>ttft_p95_ms</th><th>tpot_p95_ms</th><th>throughput_tok_per_s</th><th>goodput</th><th>result_label</th><th>score_main</th><th>is_merge_candidate</th></tr></thead><tbody><tr><td>AUTO-7DB5BD009B</td><td>2026-03-16</td><td>baseline</td><td>qps1.0_n8</td><td>18305.469982007053</td><td>992.7760795670902</td><td>6.042344974098638</td><td></td><td>neutral</td><td>0.0</td><td>false</td></tr><tr><td>AUTO-CD38E89FCC</td><td>2026-03-16</td><td>baseline</td><td>qps1.0_n8</td><td>15475.566118224524</td><td>788.2997422005117</td><td>8.174784865868432</td><td></td><td>neutral</td><td>0.0</td><td>false</td></tr></tbody></table>
   </div>
 
   <script>
-    const trendData = [];
+    const trendData = [{"experiment_id": "AUTO-7DB5BD009B", "date": "2026-03-16", "ttft_p50_ms": 16061.788275954314, "ttft_p95_ms": 18305.469982007053, "tpot_p50_ms": 893.0587975709285, "tpot_p95_ms": 992.7760795670902, "throughput_tok_per_s": 6.042344974098638, "goodput": null}, {"experiment_id": "AUTO-CD38E89FCC", "date": "2026-03-16", "ttft_p50_ms": 13126.030096958857, "ttft_p95_ms": 15475.566118224524, "tpot_p50_ms": 692.4999276820998, "tpot_p95_ms": 788.2997422005117, "throughput_tok_per_s": 8.174784865868432, "goodput": null}];
     const canvas = document.getElementById('trend');
     const ctx = canvas.getContext('2d');
     const W = canvas.width = canvas.clientWidth * devicePixelRatio;

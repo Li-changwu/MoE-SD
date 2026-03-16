@@ -25,7 +25,14 @@ def load_rows(registry_csv: Path) -> List[Dict[str, str]]:
 
 
 def valid_rows(rows: List[Dict[str, str]]) -> List[Dict[str, str]]:
-    return [r for r in rows if (r.get("status") or "").lower() in {"done", "running"} and (r.get("result_label") or "") != "invalid"]
+    out = []
+    for r in rows:
+        status = (r.get("status") or "").lower()
+        label = (r.get("result_label") or "").lower()
+        has_signal = any((to_float(r.get(k)) or 0) > 0 for k in ["ttft_p95_ms", "tpot_p95_ms", "throughput_tok_per_s", "goodput"])
+        if status in {"done", "running"} and label != "invalid" and has_signal:
+            out.append(r)
+    return out
 
 
 def best_row(rows: List[Dict[str, str]], metric: str, minimize: bool) -> Dict[str, str]:

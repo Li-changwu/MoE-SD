@@ -27,11 +27,29 @@ def parse_file(fp: Path):
         with metadata_path.open("r", encoding="utf-8") as f:
             metadata = json.load(f)
 
+    method = metadata.get("method")
+    if not method:
+        parent = fp.parent.name.lower()
+        if "eagle" in parent:
+            method = "eagle3"
+        elif "no_sd" in parent or "nosd" in parent:
+            method = "no_sd"
+        else:
+            method = parent
+
+    throughput = data.get("throughput")
+    if throughput is None:
+        throughput = data.get("output_throughput", data.get("total_token_throughput"))
+
+    goodput = data.get("goodput")
+    if goodput is None:
+        goodput = data.get("request_goodput", data.get("request_throughput"))
+
     row = {
         "file": str(fp),
-        "model": metadata.get("model", data.get("model")),
-        "method": metadata.get("method"),
-        "workload_profile": metadata.get("workload_profile"),
+        "model": metadata.get("model", data.get("model", data.get("model_id"))),
+        "method": method,
+        "workload_profile": metadata.get("workload_profile", f"qps{data.get('request_rate', 'na')}_n{data.get('num_prompts', 'na')}"),
         "mode": metadata.get("mode"),
         "seed": metadata.get("seed"),
         "git_commit": metadata.get("git_commit"),
@@ -40,15 +58,15 @@ def parse_file(fp: Path):
         "request_rate": metadata.get("request_rate", data.get("request_rate")),
         "prompt_len": metadata.get("prompt_len"),
         "output_len": metadata.get("output_len"),
-        "mean_ttft_ms": safe_get(data, "ttft", "mean"),
-        "p50_ttft_ms": safe_get(data, "ttft", "p50"),
-        "p95_ttft_ms": safe_get(data, "ttft", "p95"),
-        "mean_tpot_ms": safe_get(data, "tpot", "mean"),
-        "p50_tpot_ms": safe_get(data, "tpot", "p50"),
-        "p95_tpot_ms": safe_get(data, "tpot", "p95"),
-        "mean_itl_ms": safe_get(data, "itl", "mean"),
-        "throughput": data.get("throughput"),
-        "goodput": data.get("goodput"),
+        "mean_ttft_ms": safe_get(data, "ttft", "mean", default=data.get("mean_ttft_ms")),
+        "p50_ttft_ms": safe_get(data, "ttft", "p50", default=data.get("median_ttft_ms")),
+        "p95_ttft_ms": safe_get(data, "ttft", "p95", default=data.get("p95_ttft_ms", data.get("p99_ttft_ms"))),
+        "mean_tpot_ms": safe_get(data, "tpot", "mean", default=data.get("mean_tpot_ms")),
+        "p50_tpot_ms": safe_get(data, "tpot", "p50", default=data.get("median_tpot_ms")),
+        "p95_tpot_ms": safe_get(data, "tpot", "p95", default=data.get("p95_tpot_ms", data.get("p99_tpot_ms"))),
+        "mean_itl_ms": safe_get(data, "itl", "mean", default=data.get("mean_itl_ms")),
+        "throughput": throughput,
+        "goodput": goodput,
     }
     return row
 

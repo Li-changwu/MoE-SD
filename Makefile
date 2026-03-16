@@ -62,8 +62,10 @@ help:
 	@echo "  init-registry         Initialize experiment registry"
 	@echo "  scaffold-exp          Create one standard experiment directory"
 	@echo "  append-exp            Upsert one experiment into registry"
+	@echo "  sync-registry         Sync registry from parsed summary.csv"
 	@echo "  dashboard-build       Build optimization dashboard and regression table"
 	@echo "  dashboard-readme      Refresh README dashboard snapshot"
+	@echo "  dashboard-refresh     Parse raw results + sync registry + refresh dashboard"
 	@echo "  clean-results         Remove generated results"
 
 .PHONY: init-layout
@@ -241,6 +243,12 @@ append-exp:
 		--exp-dir $(EXP_DIR) \
 		--registry-csv $(RESULTS_DIR)/registry/experiment_registry.csv
 
+.PHONY: sync-registry
+sync-registry:
+	$(PYTHON) tools/sync_registry_from_summary.py \
+		--summary-csv $(RESULTS_DIR)/parsed/summary.csv \
+		--registry-csv $(RESULTS_DIR)/registry/experiment_registry.csv
+
 .PHONY: dashboard-build
 dashboard-build:
 	$(PYTHON) tools/build_decision_dashboard.py \
@@ -264,6 +272,9 @@ dashboard-readme:
 
 .PHONY: update-readme-dashboard
 update-readme-dashboard: dashboard-readme
+
+.PHONY: dashboard-refresh
+dashboard-refresh: parse-results sync-registry dashboard-readme
 
 .PHONY: clean-results
 clean-results:

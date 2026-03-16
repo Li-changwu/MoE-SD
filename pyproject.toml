@@ -12,5 +12,8 @@ dependencies = [
 	"PyYAML>=6.0",
 ]
 
+[project.scripts]
+moe-sd-runtime = "vllm_moe_sd_scheduler.cli:main"
+
 [tool.setuptools]
-packages = ["adapters", "controllers", "collectors", "tools"]
+packages = ["adapters", "controllers", "collectors", "tools", "vllm_moe_sd_scheduler"]
