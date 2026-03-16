@@ -33,6 +33,9 @@ SEED ?= 42
 # spec decode config
 SPEC_METHOD ?= eagle3
 SPEC_TOKENS ?= 4
+SPEC_MODEL ?= /home/sage3/models/Qwen3-30B-A3B-Instruct-2507-speculator.eagle3
+
+SPEC_CONFIG := {"method":"$(SPEC_METHOD)","num_speculative_tokens":$(SPEC_TOKENS),"model":"$(SPEC_MODEL)"}
 
 .PHONY: help
 help:
@@ -86,7 +89,7 @@ run-server-eagle3:
 		--max-model-len $(MAX_MODEL_LEN) \
 		--gpu-memory-utilization $(GPU_MEMORY_UTILIZATION) \
 		$(OFFLOAD_ARGS) \
-		--speculative_config '{"method":"$(SPEC_METHOD)","num_speculative_tokens":$(SPEC_TOKENS)}' \
+		--speculative_config '$(SPEC_CONFIG)' \
 		$(SERVER_EXTRA_ARGS)
 
 .PHONY: bench-serve-no-sd
