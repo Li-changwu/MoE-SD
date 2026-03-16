@@ -139,6 +139,14 @@ See docs/experiment_decision_board.md for full schema and policy.
 make dashboard-readme
 ```
 
+### 11. Run observability collectors
+
+```bash
+make collect-acceptance ACCEPT_TRACE=results/raw/trace/acceptance.jsonl
+make collect-moe-trace MOE_TRACE=results/raw/trace/moe_trace.jsonl
+make analyze-memory MEMORY_SNAPSHOTS=results/raw/trace/memory.jsonl
+```
+
 The repository also includes an auto-refresh workflow:
 
 - .github/workflows/update-dashboard-readme.yml
@@ -157,6 +165,9 @@ It updates README on:
 - `docs/make_targets.md`: standardized make entrypoints
 - `docs/result_naming_convention.md`: result path + metadata contract
 - `docs/issue_execution_plan.md`: issue execution waves and policy
+- `docs/acceptance_report.md`: acceptance collector output contract
+- `docs/moe_trace_report.md`: MoE trace collector output contract
+- `docs/memory_breakdown.md`: memory decomposition output contract
 
 ## Research roadmap
 

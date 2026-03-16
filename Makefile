@@ -56,6 +56,9 @@ help:
 	@echo "  bench-throughput-no-sd"
 	@echo "  bench-throughput-eagle3"
 	@echo "  parse-results         Parse raw benchmark results"
+	@echo "  collect-acceptance    Build acceptance metrics from trace"
+	@echo "  collect-moe-trace     Build MoE trace metrics from trace"
+	@echo "  analyze-memory        Build memory breakdown tables and chart"
 	@echo "  init-registry         Initialize experiment registry"
 	@echo "  scaffold-exp          Create one standard experiment directory"
 	@echo "  append-exp            Upsert one experiment into registry"
@@ -192,6 +195,26 @@ run-baseline-eagle3:
 .PHONY: parse-results
 parse-results:
 	$(PYTHON) tools/parse_bench_results.py --input-dir $(RESULTS_DIR)/raw --output-dir $(RESULTS_DIR)/parsed
+
+ACCEPT_TRACE ?=
+MOE_TRACE ?=
+MEMORY_SNAPSHOTS ?=
+BENCH_SUMMARY ?=$(RESULTS_DIR)/parsed/summary.csv
+
+.PHONY: collect-acceptance
+collect-acceptance:
+	@if [ -z "$(ACCEPT_TRACE)" ]; then echo "ACCEPT_TRACE is required, e.g. make collect-acceptance ACCEPT_TRACE=results/raw/trace/acceptance.jsonl"; exit 1; fi
+	$(PYTHON) collectors/acceptance_collector.py --trace "$(ACCEPT_TRACE)" --bench-summary "$(BENCH_SUMMARY)" --output-dir $(RESULTS_DIR)/acceptance
+
+.PHONY: collect-moe-trace
+collect-moe-trace:
+	@if [ -z "$(MOE_TRACE)" ]; then echo "MOE_TRACE is required, e.g. make collect-moe-trace MOE_TRACE=results/raw/trace/moe_trace.jsonl"; exit 1; fi
+	$(PYTHON) collectors/moe_trace_collector.py --trace "$(MOE_TRACE)" --output-dir $(RESULTS_DIR)/moe_trace
+
+.PHONY: analyze-memory
+analyze-memory:
+	@if [ -z "$(MEMORY_SNAPSHOTS)" ]; then echo "MEMORY_SNAPSHOTS is required, e.g. make analyze-memory MEMORY_SNAPSHOTS=results/raw/trace/memory.jsonl"; exit 1; fi
+	$(PYTHON) tools/memory_breakdown.py --snapshots "$(MEMORY_SNAPSHOTS)" --output-dir $(RESULTS_DIR)/memory_breakdown
 
 EXP_ID ?=
 EXP_DIR ?=
