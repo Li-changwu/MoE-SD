@@ -100,6 +100,9 @@ ensure_label(base, headers, "p2", "0E8A16", "锦上添花，或偏论文打磨/�
 ensure_label(base, headers, "tooling", "7057FF", "工具链")
 ensure_label(base, headers, "artifact", "CFD3D7", "artifact产出")
 ensure_label(base, headers, "reproducibility", "0E8A16", "可复现性")
+ensure_label(base, headers, "dashboard", "1F6FEB", "看板与数据可视化")
+ensure_label(base, headers, "regression", "B60205", "回归或稳定性问题")
+ensure_label(base, headers, "merge-candidate", "0E8A16", "满足合入候选条件")
 
 issue_19_title = "ISSUE-019：Makefile 与脚本入口统一"
 issue_19_body = """## Summary
