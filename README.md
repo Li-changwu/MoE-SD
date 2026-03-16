@@ -182,6 +182,8 @@ It updates README on:
 - `docs/static_governor_v0.md`: static governor v0 rules and outputs
 - `docs/phase_aware_design.md`: phase-aware governor v1 design and rules
 - `docs/fallback_policy.md`: fallback and hot-switch policy
+- `docs/prefetch_design.md`: acceptance-aware prefetch v1 heuristic design
+- `docs/memory_partition_design.md`: dynamic memory partition controller v2 design
 
 ## Package Runtime Entry
 
