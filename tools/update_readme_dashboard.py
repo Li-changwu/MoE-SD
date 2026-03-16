@@ -88,14 +88,27 @@ def fmt_delta(v: Any) -> str:
     return f"{num:+.2f}%"
 
 
+def display_method(row: Dict[str, str]) -> str:
+    method = (row.get("spec_method") or "").strip()
+    return method if method else "no_sd"
+
+
+def display_model(row: Dict[str, str]) -> str:
+    model = (row.get("model") or "").strip()
+    if not model:
+        return "unknown"
+    return model.split("/")[-1]
+
+
 def card_line(title: str, row: Optional[Dict[str, str]], metric: str, delta_metric: str) -> str:
     if not row:
         return f"- **{title}**: n/a"
     return (
         f"- **{title}**: {row.get('experiment_id', '')} | "
+        f"model={display_model(row)} | "
         f"{metric}={row.get(metric, 'n/a')} | "
         f"delta={fmt_delta(row.get(delta_metric))} | "
-        f"method={row.get('spec_method', '')} | "
+        f"method={display_method(row)} | "
         f"policy={row.get('policy_name', '')}"
     )
 
@@ -144,7 +157,8 @@ def build_dashboard_block(rows: List[Dict[str, str]], dashboard_rel_path: str) -
     lines.append("")
     lines.append("### E. 当前推荐配置")
     if rec:
-        lines.append(f"- config: {rec.get('spec_method', '')} + {rec.get('policy_name', '')}")
+        lines.append(f"- model: {display_model(rec)}")
+        lines.append(f"- config: {display_method(rec)} + {rec.get('policy_name', '')}")
         lines.append(f"- workload_scope: {rec.get('workload_profile', '')}")
         lines.append(f"- risk: {rec.get('primary_cost', '') or 'n/a'}")
         lines.append(f"- score_main: {rec.get('score_main', 'n/a')}")
@@ -158,14 +172,16 @@ def build_dashboard_block(rows: List[Dict[str, str]], dashboard_rel_path: str) -
     lines.append("")
     lines.append("### 最近实验台账")
     lines.append("")
-    lines.append("| experiment_id | date | module | workload | ttft_p95_ms | tpot_p95_ms | throughput | goodput | result_label | score_main | merge_candidate |")
-    lines.append("| --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- | ---: | --- |")
+    lines.append("| experiment_id | date | model | method | module | workload | ttft_p95_ms | tpot_p95_ms | throughput | goodput | result_label | score_main | merge_candidate |")
+    lines.append("| --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- | ---: | --- |")
     if latest:
         for r in latest:
             lines.append(
-                "| {exp} | {date} | {mod} | {wk} | {ttft} | {tpot} | {tput} | {gp} | {label} | {score} | {merge} |".format(
+                "| {exp} | {date} | {model} | {method} | {mod} | {wk} | {ttft} | {tpot} | {tput} | {gp} | {label} | {score} | {merge} |".format(
                     exp=r.get("experiment_id", ""),
                     date=r.get("date", ""),
+                    model=display_model(r),
+                    method=display_method(r),
                     mod=r.get("optimization_module", ""),
                     wk=r.get("workload_profile", ""),
                     ttft=r.get("ttft_p95_ms", ""),
@@ -178,7 +194,7 @@ def build_dashboard_block(rows: List[Dict[str, str]], dashboard_rel_path: str) -
                 )
             )
     else:
-        lines.append("| n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |")
+        lines.append("| n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a | n/a |")
 
     return "\n".join(lines)
 

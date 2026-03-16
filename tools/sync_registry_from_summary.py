@@ -2,6 +2,7 @@ import argparse
 import csv
 import hashlib
 from datetime import datetime
+from pathlib import PurePosixPath
 from pathlib import Path
 from typing import Dict, List
 
@@ -61,6 +62,15 @@ def has_metric_signal(row: Dict[str, str]) -> bool:
     return any(to_float(row.get(k, "")) > 0 for k in ["p95_ttft_ms", "p95_tpot_ms", "throughput", "goodput"])
 
 
+def compact_model_name(model: str) -> str:
+    m = (model or "").strip()
+    if not m:
+        return "unknown-model"
+    if "/" in m:
+        return PurePosixPath(m).name
+    return m
+
+
 def row_template() -> Dict[str, str]:
     return {k: "" for k in FIELDS}
 
@@ -69,6 +79,8 @@ def update_row_from_summary(base: Dict[str, str], summary: Dict[str, str], owner
     now = datetime.now().isoformat(timespec="seconds")
     method = normalize_method(summary.get("method", ""))
     is_no_sd = method in {"no_sd", "vanilla", "base"}
+    model = summary.get("model", "")
+    model_name = compact_model_name(model)
 
     base["experiment_id"] = base.get("experiment_id") or make_auto_experiment_id(summary.get("file", ""))
     base["date"] = base.get("date") or datetime.now().date().isoformat()
@@ -76,11 +88,12 @@ def update_row_from_summary(base: Dict[str, str], summary: Dict[str, str], owner
     base["issue_id"] = base.get("issue_id") or issue_id
     base["status"] = "done"
     base["optimization_target"] = "latency_throughput"
-    base["optimization_module"] = "baseline"
-    base["model"] = summary.get("model", "")
-    base["spec_method"] = "" if is_no_sd else method
+    base["optimization_module"] = f"baseline/{'no_sd' if is_no_sd else method}"
+    base["change_summary"] = base.get("change_summary") or f"auto-import benchmark ({'no_sd' if is_no_sd else method})"
+    base["model"] = model
+    base["spec_method"] = "no_sd" if is_no_sd else method
     base["num_speculative_tokens"] = base.get("num_speculative_tokens") or "0"
-    base["policy_name"] = base.get("policy_name") or "baseline"
+    base["policy_name"] = base.get("policy_name") or f"baseline_{'no_sd' if is_no_sd else method}"
     base["workload_profile"] = derive_workload(summary)
     base["seed"] = summary.get("seed", "")
     base["commit_hash"] = summary.get("git_commit", "")
@@ -97,6 +110,7 @@ def update_row_from_summary(base: Dict[str, str], summary: Dict[str, str], owner
     base["result_label"] = base.get("result_label") or "neutral"
     base["score_main"] = base.get("score_main") or "0.0"
     base["is_merge_candidate"] = base.get("is_merge_candidate") or "false"
+    base["final_conclusion"] = base.get("final_conclusion") or f"baseline {base['spec_method']} on {model_name}"
     base["result_path"] = summary.get("file", "")
     base["last_updated"] = now
     return base

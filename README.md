@@ -4,22 +4,24 @@
 <!-- AUTO_DASHBOARD_START -->
 ## Optimization Dashboard Snapshot
 
-Updated: 2026-03-16 19:58 UTC  
+Updated: 2026-03-16 20:02 UTC  
 Dashboard HTML: [docs/dashboard/optimization_dashboard.html](docs/dashboard/optimization_dashboard.html)
 
 ### A. 当前最优结果卡片
-- **Best TTFT**: AUTO-CD38E89FCC | ttft_p95_ms=15475.566118224524 | delta=n/a | method= | policy=baseline
-- **Best TPOT**: AUTO-CD38E89FCC | tpot_p95_ms=788.2997422005117 | delta=n/a | method= | policy=baseline
-- **Best Throughput**: AUTO-CD38E89FCC | throughput_tok_per_s=8.174784865868432 | delta=n/a | method= | policy=baseline
+- **Best TTFT**: AUTO-CD38E89FCC | model=Qwen3-30B-A3B-Instruct-2507 | ttft_p95_ms=15475.566118224524 | delta=n/a | method=no_sd | policy=baseline
+- **Best TPOT**: AUTO-CD38E89FCC | model=Qwen3-30B-A3B-Instruct-2507 | tpot_p95_ms=788.2997422005117 | delta=n/a | method=no_sd | policy=baseline
+- **Best Throughput**: AUTO-CD38E89FCC | model=Qwen3-30B-A3B-Instruct-2507 | throughput_tok_per_s=8.174784865868432 | delta=n/a | method=no_sd | policy=baseline
 - **Best Goodput**: n/a
 
 ### C. 实验结论分布
 - neutral: 2
 
 ### D. 模块贡献分布
-- baseline: 2
+- baseline/eagle3: 1
+- baseline/no_sd: 1
 
 ### E. 当前推荐配置
+- model: Qwen3-30B-A3B-Instruct-2507
 - config: eagle3 + baseline
 - workload_scope: qps1.0_n8
 - risk: n/a
@@ -31,10 +33,10 @@ Dashboard HTML: [docs/dashboard/optimization_dashboard.html](docs/dashboard/opti
 
 ### 最近实验台账
 
-| experiment_id | date | module | workload | ttft_p95_ms | tpot_p95_ms | throughput | goodput | result_label | score_main | merge_candidate |
-| --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- | ---: | --- |
-| AUTO-CD38E89FCC | 2026-03-16 | baseline | qps1.0_n8 | 15475.566118224524 | 788.2997422005117 | 8.174784865868432 |  | neutral | 0.0 | false |
-| AUTO-7DB5BD009B | 2026-03-16 | baseline | qps1.0_n8 | 18305.469982007053 | 992.7760795670902 | 6.042344974098638 |  | neutral | 0.0 | false |
+| experiment_id | date | model | method | module | workload | ttft_p95_ms | tpot_p95_ms | throughput | goodput | result_label | score_main | merge_candidate |
+| --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- | ---: | --- |
+| AUTO-CD38E89FCC | 2026-03-16 | Qwen3-30B-A3B-Instruct-2507 | no_sd | baseline/no_sd | qps1.0_n8 | 15475.566118224524 | 788.2997422005117 | 8.174784865868432 |  | neutral | 0.0 | false |
+| AUTO-7DB5BD009B | 2026-03-16 | Qwen3-30B-A3B-Instruct-2507 | eagle3 | baseline/eagle3 | qps1.0_n8 | 18305.469982007053 | 992.7760795670902 | 6.042344974098638 |  | neutral | 0.0 | false |
 <!-- AUTO_DASHBOARD_END -->
 
 A plugin-style scheduling framework for memory-constrained MoE inference with speculative decoding on top of vLLM.
@@ -174,6 +176,9 @@ It updates README on:
 - `docs/memory_breakdown.md`: memory decomposition output contract
 - `docs/integration_boundary.md`: plugin/adapter/patch boundary and rollout rules
 - `docs/config_protocol.md`: scheduler config and feature-flag contract
+- `docs/controller_interface.md`: frozen scheduler controller interface
+- `docs/state_schema.yaml`: request/phase/step state schema
+- `docs/decision_trace_schema.yaml`: decision trace schema
 
 ## Package Runtime Entry
 

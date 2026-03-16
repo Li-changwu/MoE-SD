@@ -16,15 +16,23 @@
     .muted { color: #6b7280; font-size: 12px; }
     #trend { width: 100%; height: 360px; }
     .legend span { margin-right: 10px; font-size: 12px; }
+        .table-wrap { overflow-x: auto; border: 1px solid #e5e7eb; border-radius: 10px; }
+        .ledger-table { min-width: 1500px; border-collapse: separate; border-spacing: 0; width: 100%; }
+        .ledger-table th, .ledger-table td { white-space: nowrap; background: #fff; }
+        .ledger-table thead th { position: sticky; top: 0; z-index: 4; }
+        .ledger-table th:nth-child(1), .ledger-table td:nth-child(1) { position: sticky; left: 0; z-index: 3; min-width: 220px; max-width: 220px; white-space: normal; background: #f8fafc; }
+        .ledger-table th:nth-child(2), .ledger-table td:nth-child(2) { position: sticky; left: 220px; z-index: 3; min-width: 120px; max-width: 120px; background: #f8fafc; }
+        .ledger-table th:nth-child(3), .ledger-table td:nth-child(3) { position: sticky; left: 340px; z-index: 3; min-width: 240px; max-width: 240px; white-space: normal; background: #f8fafc; }
+        .ledger-table thead th:nth-child(1), .ledger-table thead th:nth-child(2), .ledger-table thead th:nth-child(3) { z-index: 5; background: #eaf1fb; }
   </style>
 </head>
 <body>
   <h1>Optimization Dashboard</h1>
-  <p class="muted">Generated at: 2026-03-16T15:58:32</p>
+  <p class="muted">Generated at: 2026-03-16T16:02:29</p>
 
   <div class="panel">
     <h2>A. 当前最优结果卡片</h2>
-    <div class="grid"><div class='card'><h3>Best TTFT</h3><p><b>Method:</b> </p><p><b>Config:</b> policy=baseline; module=baseline</p><p><b>Value:</b> 15475.566118224524</p><p><b>Delta vs baseline:</b> %</p><p><b>Workload:</b> qps1.0_n8</p><p><b>Updated:</b> 2026-03-16T15:58:32</p></div><div class='card'><h3>Best TPOT</h3><p><b>Method:</b> </p><p><b>Config:</b> policy=baseline; module=baseline</p><p><b>Value:</b> 788.2997422005117</p><p><b>Delta vs baseline:</b> %</p><p><b>Workload:</b> qps1.0_n8</p><p><b>Updated:</b> 2026-03-16T15:58:32</p></div><div class='card'><h3>Best Throughput</h3><p><b>Method:</b> </p><p><b>Config:</b> policy=baseline; module=baseline</p><p><b>Value:</b> 8.174784865868432</p><p><b>Delta vs baseline:</b> %</p><p><b>Workload:</b> qps1.0_n8</p><p><b>Updated:</b> 2026-03-16T15:58:32</p></div><div class='card'><h3>Best Goodput</h3><p>No data</p></div></div>
+    <div class="grid"><div class='card'><h3>Best TTFT</h3><p><b>Model:</b> Qwen3-30B-A3B-Instruct-2507</p><p><b>Method:</b> no_sd</p><p><b>Config:</b> policy=baseline; module=baseline/no_sd</p><p><b>Value:</b> 15475.566118224524</p><p><b>Delta vs baseline:</b> %</p><p><b>Workload:</b> qps1.0_n8</p><p><b>Updated:</b> 2026-03-16T16:02:29</p></div><div class='card'><h3>Best TPOT</h3><p><b>Model:</b> Qwen3-30B-A3B-Instruct-2507</p><p><b>Method:</b> no_sd</p><p><b>Config:</b> policy=baseline; module=baseline/no_sd</p><p><b>Value:</b> 788.2997422005117</p><p><b>Delta vs baseline:</b> %</p><p><b>Workload:</b> qps1.0_n8</p><p><b>Updated:</b> 2026-03-16T16:02:29</p></div><div class='card'><h3>Best Throughput</h3><p><b>Model:</b> Qwen3-30B-A3B-Instruct-2507</p><p><b>Method:</b> no_sd</p><p><b>Config:</b> policy=baseline; module=baseline/no_sd</p><p><b>Value:</b> 8.174784865868432</p><p><b>Delta vs baseline:</b> %</p><p><b>Workload:</b> qps1.0_n8</p><p><b>Updated:</b> 2026-03-16T16:02:29</p></div><div class='card'><h3>Best Goodput</h3><p>No data</p></div></div>
   </div>
 
   <div class="panel">
@@ -47,12 +55,12 @@
 
   <div class="panel">
     <h2>D. 模块贡献分布</h2>
-    <ul><li>baseline: 2</li></ul>
+    <ul><li>baseline/eagle3: 1</li><li>baseline/no_sd: 1</li></ul>
   </div>
 
   <div class="panel">
     <h2>E. 当前推荐配置</h2>
-    <p><b>配置:</b> eagle3 + baseline</p><p><b>Scope:</b> qps1.0_n8</p><p><b>Risk:</b> </p><p><b>score_main:</b> 0.0</p><p><b>merge candidate:</b> false</p>
+    <p><b>模型:</b> Qwen3-30B-A3B-Instruct-2507</p><p><b>配置:</b> eagle3 + baseline</p><p><b>Scope:</b> qps1.0_n8</p><p><b>Risk:</b> </p><p><b>score_main:</b> 0.0</p><p><b>merge candidate:</b> false</p>
   </div>
 
   <div class="panel">
@@ -62,7 +70,7 @@
 
   <div class="panel">
     <h2>实验台账（最近）</h2>
-    <table><thead><tr><th>experiment_id</th><th>date</th><th>optimization_module</th><th>workload_profile</th><th>ttft_p95_ms</th><th>tpot_p95_ms</th><th>throughput_tok_per_s</th><th>goodput</th><th>result_label</th><th>score_main</th><th>is_merge_candidate</th></tr></thead><tbody><tr><td>AUTO-7DB5BD009B</td><td>2026-03-16</td><td>baseline</td><td>qps1.0_n8</td><td>18305.469982007053</td><td>992.7760795670902</td><td>6.042344974098638</td><td></td><td>neutral</td><td>0.0</td><td>false</td></tr><tr><td>AUTO-CD38E89FCC</td><td>2026-03-16</td><td>baseline</td><td>qps1.0_n8</td><td>15475.566118224524</td><td>788.2997422005117</td><td>8.174784865868432</td><td></td><td>neutral</td><td>0.0</td><td>false</td></tr></tbody></table>
+    <div class='table-wrap'><table class='ledger-table'><thead><tr><th>experiment_id</th><th>date</th><th>model</th><th>spec_method</th><th>optimization_module</th><th>workload_profile</th><th>ttft_p95_ms</th><th>tpot_p95_ms</th><th>throughput_tok_per_s</th><th>goodput</th><th>result_label</th><th>score_main</th><th>is_merge_candidate</th></tr></thead><tbody><tr><td>AUTO-7DB5BD009B</td><td>2026-03-16</td><td>Qwen3-30B-A3B-Instruct-2507</td><td>eagle3</td><td>baseline/eagle3</td><td>qps1.0_n8</td><td>18305.469982007053</td><td>992.7760795670902</td><td>6.042344974098638</td><td></td><td>neutral</td><td>0.0</td><td>false</td></tr><tr><td>AUTO-CD38E89FCC</td><td>2026-03-16</td><td>Qwen3-30B-A3B-Instruct-2507</td><td>no_sd</td><td>baseline/no_sd</td><td>qps1.0_n8</td><td>15475.566118224524</td><td>788.2997422005117</td><td>8.174784865868432</td><td></td><td>neutral</td><td>0.0</td><td>false</td></tr></tbody></table></div>
   </div>
 
   <script>

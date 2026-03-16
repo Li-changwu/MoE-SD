@@ -43,6 +43,18 @@ def best_row(rows: List[Dict[str, str]], metric: str, minimize: bool) -> Dict[st
     return min(cands, key=key_fn) if minimize else max(cands, key=key_fn)
 
 
+def display_method(row: Dict[str, str]) -> str:
+    method = (row.get("spec_method") or "").strip()
+    return method if method else "no_sd"
+
+
+def display_model(row: Dict[str, str]) -> str:
+    model = (row.get("model") or "").strip()
+    if not model:
+        return "unknown"
+    return model.split("/")[-1]
+
+
 def build_best_cards(rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
     defs = [
         ("Best TTFT", "ttft_p95_ms", True, "delta_ttft_p95_pct"),
@@ -59,7 +71,8 @@ def build_best_cards(rows: List[Dict[str, str]]) -> List[Dict[str, Any]]:
         cards.append(
             {
                 "title": title,
-                "method": row.get("spec_method", ""),
+                "model": display_model(row),
+                "method": display_method(row),
                 "config": f"policy={row.get('policy_name', '')}; module={row.get('optimization_module', '')}",
                 "value": row.get(metric, ""),
                 "delta": row.get(delta_metric, ""),
@@ -129,7 +142,7 @@ def html_table(rows: List[Dict[str, str]], columns: List[str], limit: int = 12) 
     for r in rows:
         td = "".join(f"<td>{html.escape(str(r.get(c, '')))}</td>" for c in columns)
         tr.append(f"<tr>{td}</tr>")
-    return f"<table><thead><tr>{th}</tr></thead><tbody>{''.join(tr)}</tbody></table>"
+    return f"<div class='table-wrap'><table class='ledger-table'><thead><tr>{th}</tr></thead><tbody>{''.join(tr)}</tbody></table></div>"
 
 
 def build_html(rows: List[Dict[str, str]]) -> str:
@@ -164,6 +177,7 @@ def build_html(rows: List[Dict[str, str]]) -> str:
         cards_html.append(
             "<div class='card'>"
             f"<h3>{html.escape(c['title'])}</h3>"
+            f"<p><b>Model:</b> {html.escape(c['model'])}</p>"
             f"<p><b>Method:</b> {html.escape(c['method'])}</p>"
             f"<p><b>Config:</b> {html.escape(c['config'])}</p>"
             f"<p><b>Value:</b> {html.escape(str(c['value']))}</p>"
@@ -180,18 +194,25 @@ def build_html(rows: List[Dict[str, str]]) -> str:
     rec_block = "No recommendation yet"
     if rec:
         rec_block = (
-            f"<p><b>配置:</b> {html.escape(rec.get('spec_method', ''))} + {html.escape(rec.get('policy_name', ''))}</p>"
+            f"<p><b>模型:</b> {html.escape(display_model(rec))}</p>"
+            f"<p><b>配置:</b> {html.escape(display_method(rec))} + {html.escape(rec.get('policy_name', ''))}</p>"
             f"<p><b>Scope:</b> {html.escape(rec.get('workload_profile', ''))}</p>"
             f"<p><b>Risk:</b> {html.escape(rec.get('primary_cost', ''))}</p>"
             f"<p><b>score_main:</b> {html.escape(str(rec.get('score_main', '')))}</p>"
             f"<p><b>merge candidate:</b> {html.escape(rec.get('is_merge_candidate', ''))}</p>"
         )
 
+    for row in latest:
+        row["model"] = display_model(row)
+        row["spec_method"] = display_method(row)
+
     latest_table = html_table(
         latest,
         [
             "experiment_id",
             "date",
+            "model",
+            "spec_method",
             "optimization_module",
             "workload_profile",
             "ttft_p95_ms",
@@ -225,6 +246,14 @@ def build_html(rows: List[Dict[str, str]]) -> str:
     .muted {{ color: #6b7280; font-size: 12px; }}
     #trend {{ width: 100%; height: 360px; }}
     .legend span {{ margin-right: 10px; font-size: 12px; }}
+        .table-wrap {{ overflow-x: auto; border: 1px solid #e5e7eb; border-radius: 10px; }}
+        .ledger-table {{ min-width: 1500px; border-collapse: separate; border-spacing: 0; width: 100%; }}
+        .ledger-table th, .ledger-table td {{ white-space: nowrap; background: #fff; }}
+        .ledger-table thead th {{ position: sticky; top: 0; z-index: 4; }}
+        .ledger-table th:nth-child(1), .ledger-table td:nth-child(1) {{ position: sticky; left: 0; z-index: 3; min-width: 220px; max-width: 220px; white-space: normal; background: #f8fafc; }}
+        .ledger-table th:nth-child(2), .ledger-table td:nth-child(2) {{ position: sticky; left: 220px; z-index: 3; min-width: 120px; max-width: 120px; background: #f8fafc; }}
+        .ledger-table th:nth-child(3), .ledger-table td:nth-child(3) {{ position: sticky; left: 340px; z-index: 3; min-width: 240px; max-width: 240px; white-space: normal; background: #f8fafc; }}
+        .ledger-table thead th:nth-child(1), .ledger-table thead th:nth-child(2), .ledger-table thead th:nth-child(3) {{ z-index: 5; background: #eaf1fb; }}
   </style>
 </head>
 <body>
