@@ -24,3 +24,7 @@ bash scripts/reproduce_main_results.sh
 - full system
 
 Current repository may contain a subset depending on available benchmark runs.
+
+## Latest Baseline Snapshot
+
+- `docs/baseline_bench_20260316.md`
