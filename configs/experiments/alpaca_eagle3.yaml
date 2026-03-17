@@ -1,0 +1,35 @@
+# Alpaca 基准测试 - EAGLE-3 推测解码
+# 使用 Alpaca 数据集评估推测解码加速效果
+
+model: "/home/sage3/models/Qwen3-30B-A3B-Instruct-2507"
+dataset_file: "data/alpaca_subset.jsonl"
+num_prompts: 100
+seed: 42
+request_rate: 2.0
+prompt_len: 512
+output_len: 256
+base_url: "http://127.0.0.1:8000/v1"
+endpoint: "/v1/chat/completions"
+
+engine:
+  gpu_memory_utilization: 0.9
+  max_model_len: 2048
+  tensor_parallel_size: 1
+  cpu_offload_gb: 0
+  swap_space: 4
+
+speculative_config:
+  model: "/home/sage3/models/Qwen3-30B-A3B-Instruct-2507-speculator.eagle3"
+  num_speculative_tokens: 3
+  method: "eagle3"
+
+modes:
+  - serve
+  - latency
+  - throughput
+
+output_dir: "results/alpaca_eagle3"
+metadata:
+  experiment: "alpaca_eagle3"
+  method: "eagle3_speculative_decoding"
+  dataset: "alpaca"

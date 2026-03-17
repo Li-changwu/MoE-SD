@@ -334,3 +334,62 @@ clean-results:
 	rm -rf $(RESULTS_DIR)/raw/*
 	rm -rf $(RESULTS_DIR)/parsed/*
 	rm -rf $(RESULTS_DIR)/figures/*
+
+# ============================================
+# Public Dataset Benchmark Targets
+# ============================================
+
+DATASET ?= sharegpt
+DATASET_SAMPLES ?= 100
+
+.PHONY: download-sharegpt
+download-sharegpt:
+@echo "Downloading ShareGPT subset ($(DATASET_SAMPLES) samples)..."
+python3 tools/dataset_downloader.py --dataset sharegpt --max-samples $(DATASET_SAMPLES)
+
+.PHONY: download-alpaca
+download-alpaca:
+@echo "Downloading Alpaca subset ($(DATASET_SAMPLES) samples)..."
+python3 tools/dataset_downloader.py --dataset alpaca --max-samples $(DATASET_SAMPLES)
+
+.PHONY: download-dolly
+download-dolly:
+@echo "Downloading Dolly-15k subset ($(DATASET_SAMPLES) samples)..."
+python3 tools/dataset_downloader.py --dataset dolly --max-samples $(DATASET_SAMPLES)
+
+.PHONY: bench-sharegpt
+bench-sharegpt:
+@echo "Running benchmark on ShareGPT dataset..."
+python3 tools/bench_runner.py --config configs/experiments/baseline_sharegpt.yaml
+
+.PHONY: bench-alpaca
+bench-alpaca:
+@echo "Running benchmark on Alpaca dataset..."
+python3 tools/bench_runner.py --config configs/experiments/baseline_alpaca.yaml
+
+.PHONY: bench-dolly
+bench-dolly:
+@echo "Running benchmark on Dolly-15k dataset..."
+python3 tools/bench_runner.py --config configs/experiments/baseline_dolly.yaml
+
+.PHONY: download-and-bench
+download-and-bench:
+@echo "Downloading $(DATASET) and running benchmark..."
+python3 tools/dataset_downloader.py --dataset $(DATASET) --max-samples $(DATASET_SAMPLES)
+python3 tools/bench_runner.py --config configs/experiments/baseline_$(DATASET).yaml
+
+.PHONY: list-datasets
+list-datasets:
+@echo "Available public datasets:"
+@echo "  - sharegpt: Real user conversations (recommended for chat workloads)"
+@echo "  - alpaca:   Instruction-following tasks (good for task-oriented eval)"
+@echo "  - dolly:    Diverse human-generated instructions (balanced diversity)"
+@echo ""
+@echo "Usage:"
+@echo "  make download-sharegpt DATASET_SAMPLES=100"
+@echo "  make bench-sharegpt"
+@echo "  Or combined: make download-and-bench DATASET=alpaca"
+@echo ""
+@echo "Custom dataset:"
+@echo "  python3 tools/dataset_downloader.py --dataset custom --input <your-file.jsonl>"
+

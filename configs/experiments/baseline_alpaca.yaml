@@ -1,0 +1,23 @@
+# Alpaca 基准测试配置
+# 使用斯坦福 Alpaca 指令跟随数据
+
+model: "/home/sage3/models/Qwen3-30B-A3B-Instruct-2507"
+dataset_file: "data/alpaca_sample.jsonl"
+num_prompts: 100
+seed: 42
+
+engine_args:
+  gpu_memory_utilization: 0.9
+  max_model_len: 4096
+  tensor_parallel_size: 1
+  enforce_eager: false
+
+modes:
+  - offline_throughput
+  - online_latency
+
+output_dir: "results/alpaca"
+metadata:
+  dataset_source: "tatsu-lab/alpaca"
+  baseline_type: "public_dataset"
+  description: "Alpaca 指令跟随数据基准测试"

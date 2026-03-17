@@ -31,3 +31,19 @@ results/figures/*
 # OS
 .DS_Store
 Thumbs.db
+
+# Downloaded datasets (local runtime artifacts)
+data/
+
+# Backup files
+*.bak
+
+# Local GitHub Issues update tooling (machine-specific)
+docs/GITHUB_ISSUES_STATUS_REPORT.md
+docs/HOW_TO_UPDATE_GITHUB_ISSUES.md
+docs/UPDATE_ISSUES_WITHOUT_SUDO.md
+tools/quick_update_issues.py
+tools/update_github_issues.py
+scripts/update_github_issues.sh
+scripts/create_pilot_experiment_issues.py
+run_update_issues.sh

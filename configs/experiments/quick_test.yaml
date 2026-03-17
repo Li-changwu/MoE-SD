@@ -1,0 +1,29 @@
+# Quick Test Benchmark Configuration
+# Uses the test_sample.jsonl dataset for rapid testing
+
+model: /home/sage3/models/Qwen3-30B-A3B-Instruct-2507
+method: no_sd
+workload_profile: test-sample
+base_url: http://127.0.0.1:8000/v1
+endpoint: /chat/completions
+
+# Dataset configuration
+dataset_file: data/test_sample.jsonl
+num_prompts: 10  # Use all 10 prompts from test_sample.jsonl
+
+# Engine configuration
+max_model_len: 2048
+gpu_memory_utilization: 0.9
+cpu_offload_gb: 30
+swap_space: 64
+
+# Benchmark modes - start with latency only for quick test
+modes:
+  - latency
+
+# Seed for reproducibility
+seed: 42
+
+# Latency mode iterations
+latency_num_iters: 3
+latency_num_iters_warmup: 1
