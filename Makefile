@@ -67,6 +67,10 @@ help:
 	@echo "  dashboard-readme      Refresh README dashboard snapshot"
 	@echo "  dashboard-refresh     Parse raw results + sync registry + refresh dashboard"
 	@echo "  dashboard-validate    Validate registry/readme/html quality gates"
+	@echo "  main-results          Build main comparison table and figures"
+	@echo "  ablation-results      Build ablation table and figures"
+	@echo "  reproduce-main        Run full main-results reproduction script"
+	@echo "  reproduce-ablation    Run full ablation reproduction script"
 	@echo "  clean-results         Remove generated results"
 
 .PHONY: init-layout
@@ -288,6 +292,28 @@ dashboard-validate:
 
 .PHONY: dashboard-refresh
 dashboard-refresh: parse-results sync-registry dashboard-readme dashboard-validate
+
+.PHONY: main-results
+main-results:
+	$(PYTHON) tools/build_main_results.py \
+		--registry-csv $(RESULTS_DIR)/registry/experiment_registry.csv \
+		--out-table $(RESULTS_DIR)/main_table/main_comparison.csv \
+		--out-fig-dir $(RESULTS_DIR)/main_figures
+
+.PHONY: ablation-results
+ablation-results:
+	$(PYTHON) tools/build_ablation_results.py \
+		--registry-csv $(RESULTS_DIR)/registry/experiment_registry.csv \
+		--out-table $(RESULTS_DIR)/ablation/ablation.csv \
+		--out-fig-dir $(RESULTS_DIR)/ablation_figures
+
+.PHONY: reproduce-main
+reproduce-main:
+	bash scripts/reproduce_main_results.sh
+
+.PHONY: reproduce-ablation
+reproduce-ablation:
+	bash scripts/reproduce_ablation.sh
 
 .PHONY: clean-results
 clean-results:

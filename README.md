@@ -4,7 +4,7 @@
 <!-- AUTO_DASHBOARD_START -->
 ## Optimization Dashboard Snapshot
 
-Updated: 2026-03-16 20:08 UTC  
+Updated: 2026-03-17 00:56 UTC  
 Dashboard HTML: [docs/dashboard/optimization_dashboard.html](docs/dashboard/optimization_dashboard.html)
 
 ### A. 当前最优结果卡片
@@ -153,6 +153,17 @@ make collect-moe-trace MOE_TRACE=results/raw/trace/moe_trace.jsonl
 make analyze-memory MEMORY_SNAPSHOTS=results/raw/trace/memory.jsonl
 ```
 
+### 12. Build main and ablation artifacts
+
+```bash
+make main-results
+make ablation-results
+
+# full reproduction wrappers
+make reproduce-main
+make reproduce-ablation
+```
+
 The repository also includes an auto-refresh workflow:
 
 - .github/workflows/update-dashboard-readme.yml
@@ -184,6 +195,11 @@ It updates README on:
 - `docs/fallback_policy.md`: fallback and hot-switch policy
 - `docs/prefetch_design.md`: acceptance-aware prefetch v1 heuristic design
 - `docs/memory_partition_design.md`: dynamic memory partition controller v2 design
+- `docs/main_results.md`: main table and figure output contract
+- `docs/ablation_results.md`: ablation table and figure output contract
+- `docs/quickstart.md`: condensed setup and reproduction flow
+- `docs/benchmark_cookbook.md`: command cookbook for benchmark chains
+- `docs/config_zoo.md`: config index and usage
 
 ## Package Runtime Entry
 

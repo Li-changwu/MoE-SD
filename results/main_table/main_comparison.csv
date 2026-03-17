@@ -1,0 +1,3 @@
+experiment_id,model,spec_method,optimization_module,workload_profile,ttft_p95_ms,tpot_p95_ms,throughput_tok_per_s,goodput
+AUTO-CD38E89FCC,/home/sage3/models/Qwen3-30B-A3B-Instruct-2507,no_sd,baseline/no_sd,qps1.0_n8,15475.566118224524,788.2997422005117,8.174784865868432,
+AUTO-7DB5BD009B,/home/sage3/models/Qwen3-30B-A3B-Instruct-2507,eagle3,baseline/eagle3,qps1.0_n8,18305.469982007053,992.7760795670902,6.042344974098638,

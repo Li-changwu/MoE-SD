@@ -1,0 +1,3 @@
+optimization_module,spec_method,ttft_p95_ms,tpot_p95_ms,throughput_tok_per_s,rows
+baseline/eagle3,eagle3,18305.469982,992.77608,6.042345,1
+baseline/no_sd,no_sd,15475.566118,788.299742,8.174785,1
