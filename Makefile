@@ -149,8 +149,12 @@ bench-latency-no-sd:
 		--model $(MODEL) \
 		--input-len $(PROMPT_LEN) \
 		--output-len $(OUTPUT_LEN) \
-		--save-result \
-		--result-dir $(RESULTS_DIR)/raw/no_sd_latency
+		--num-iters 3 \
+		--num-iters-warmup 1 \
+		--max-model-len $(MAX_MODEL_LEN) \
+		--gpu-memory-utilization $(GPU_MEMORY_UTILIZATION) \
+		$(OFFLOAD_ARGS) \
+		--output-json $(RESULTS_DIR)/raw/no_sd_latency/latency.json
 
 .PHONY: bench-latency-eagle3
 bench-latency-eagle3:
@@ -159,8 +163,13 @@ bench-latency-eagle3:
 		--model $(MODEL) \
 		--input-len $(PROMPT_LEN) \
 		--output-len $(OUTPUT_LEN) \
-		--save-result \
-		--result-dir $(RESULTS_DIR)/raw/eagle3_latency
+		--num-iters 3 \
+		--num-iters-warmup 1 \
+		--max-model-len $(MAX_MODEL_LEN) \
+		--gpu-memory-utilization $(GPU_MEMORY_UTILIZATION) \
+		$(OFFLOAD_ARGS) \
+		--speculative-config '$(SPEC_CONFIG)' \
+		--output-json $(RESULTS_DIR)/raw/eagle3_latency/latency.json
 
 .PHONY: bench-throughput-no-sd
 bench-throughput-no-sd:
@@ -170,8 +179,10 @@ bench-throughput-no-sd:
 		--random-input-len $(PROMPT_LEN) \
 		--random-output-len $(OUTPUT_LEN) \
 		--num-prompts $(NUM_PROMPTS) \
-		--save-result \
-		--result-dir $(RESULTS_DIR)/raw/no_sd_throughput
+		--max-model-len $(MAX_MODEL_LEN) \
+		--gpu-memory-utilization $(GPU_MEMORY_UTILIZATION) \
+		$(OFFLOAD_ARGS) \
+		--output-json $(RESULTS_DIR)/raw/no_sd_throughput/throughput.json
 
 .PHONY: bench-throughput-eagle3
 bench-throughput-eagle3:
@@ -181,8 +192,11 @@ bench-throughput-eagle3:
 		--random-input-len $(PROMPT_LEN) \
 		--random-output-len $(OUTPUT_LEN) \
 		--num-prompts $(NUM_PROMPTS) \
-		--save-result \
-		--result-dir $(RESULTS_DIR)/raw/eagle3_throughput
+		--max-model-len $(MAX_MODEL_LEN) \
+		--gpu-memory-utilization $(GPU_MEMORY_UTILIZATION) \
+		$(OFFLOAD_ARGS) \
+		--speculative-config '$(SPEC_CONFIG)' \
+		--output-json $(RESULTS_DIR)/raw/eagle3_throughput/throughput.json
 
 CONFIG ?=
 

@@ -67,14 +67,26 @@ def run_bench(config: dict):
         "output_len": int(config.get("output_len", 128)),
         "request_rate": float(config.get("request_rate", 2.0)),
     }
+    engine = {
+        "max_model_len": config.get("max_model_len"),
+        "gpu_memory_utilization": config.get("gpu_memory_utilization"),
+        "cpu_offload_gb": config.get("cpu_offload_gb"),
+        "swap_space": config.get("swap_space"),
+    }
 
     cfg_hash = short_hash({"meta": meta, "common": common})
 
     for mode in config.get("modes", ["serve", "latency", "throughput"]):
         out_dir = result_dir(result_root, method, profile, mode, cfg_hash)
         out_dir.mkdir(parents=True, exist_ok=True)
+        out_json = out_dir / f"{mode}.json"
 
-        cmd = ["vllm", "bench", mode, "--model", model, "--save-result", "--result-dir", str(out_dir)]
+        cmd = ["vllm", "bench", mode, "--model", model]
+
+        if mode == "serve":
+            cmd.extend(["--save-result", "--result-dir", str(out_dir)])
+        else:
+            cmd.extend(["--output-json", str(out_json)])
 
         if mode == "serve":
             cmd.extend([
@@ -101,6 +113,10 @@ def run_bench(config: dict):
                 str(common["prompt_len"]),
                 "--output-len",
                 str(common["output_len"]),
+                "--num-iters",
+                str(int(config.get("latency_num_iters", 3))),
+                "--num-iters-warmup",
+                str(int(config.get("latency_num_iters_warmup", 1))),
             ])
         elif mode == "throughput":
             cmd.extend([
@@ -116,6 +132,16 @@ def run_bench(config: dict):
         else:
             raise ValueError(f"unsupported mode: {mode}")
 
+        if mode in {"latency", "throughput"}:
+            if engine["max_model_len"] is not None:
+                cmd.extend(["--max-model-len", str(engine["max_model_len"])])
+            if engine["gpu_memory_utilization"] is not None:
+                cmd.extend(["--gpu-memory-utilization", str(engine["gpu_memory_utilization"])])
+            if engine["cpu_offload_gb"] is not None:
+                cmd.extend(["--cpu-offload-gb", str(engine["cpu_offload_gb"])])
+            if engine["swap_space"] is not None:
+                cmd.extend(["--swap-space", str(engine["swap_space"])])
+
         if "speculative_config" in config and config["speculative_config"]:
             cmd.extend(["--speculative-config", json.dumps(config["speculative_config"])])
 
@@ -125,6 +151,7 @@ def run_bench(config: dict):
         metadata = {
             **meta,
             **common,
+            **engine,
             "mode": mode,
             "config_hash": cfg_hash,
             "speculative_config": config.get("speculative_config"),
