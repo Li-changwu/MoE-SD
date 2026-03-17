@@ -1,6 +1,4 @@
-# Alpaca 基准测试 - 无推测解码
-# 使用 Alpaca 数据集评估基础性能
-
+# Alpaca Benchmark - No Speculative Decoding
 model: "/home/sage3/models/Qwen3-30B-A3B-Instruct-2507"
 method: "no_sd"
 dataset_file: "data/alpaca_subset.jsonl"
@@ -11,14 +9,12 @@ prompt_len: 512
 output_len: 256
 base_url: "http://127.0.0.1:8000/v1"
 endpoint: "/v1/chat/completions"
-workload_profile: "online-medium"
+workload_profile: "alpaca-subset"
 
-engine:
-  gpu_memory_utilization: 0.9
-  max_model_len: 2048
-  tensor_parallel_size: 1
-  cpu_offload_gb: 0
-  swap_space: 4
+gpu_memory_utilization: 0.9
+max_model_len: 2048
+cpu_offload_gb: 30
+swap_space: 64
 
 modes:
   - serve

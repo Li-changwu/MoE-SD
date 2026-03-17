@@ -1,0 +1,17 @@
+# Issue #23: Workload 设计
+
+workloads:
+  decode_heavy:
+    description: "短输入长输出 — 代码生成场景"
+    input_len: 128
+    output_len: 512
+  prefill_heavy:
+    description: "长输入短输出 — 文档摘要场景"
+    input_len: 1024
+    output_len: 64
+
+benchmark:
+  mode: latency
+  num_iters: 3
+  num_iters_warmup: 1
+  seed: 42

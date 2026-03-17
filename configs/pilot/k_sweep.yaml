@@ -1,0 +1,20 @@
+# Issue #24: K Sweep 配置
+
+k_values:
+  - k: 0
+    method: no_sd
+  - k: 2
+    method: eagle3
+    num_speculative_tokens: 2
+  - k: 4
+    method: eagle3
+    num_speculative_tokens: 4
+  - k: 8
+    method: eagle3
+    num_speculative_tokens: 8
+
+experiment_matrix:
+  pressure_levels: [low, medium, high]
+  workloads: [decode_heavy, prefill_heavy]
+  k_values: [0, 2, 4, 8]
+  total_experiments: 24
