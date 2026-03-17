@@ -1,0 +1,4 @@
+mode,method,mean_ttft_ms,p50_ttft_ms,p95_ttft_ms,mean_tpot_ms,throughput,goodput,source_file
+serve,eagle3,9081.553371157497,9592.433229554445,11731.424214651342,762.5817240073553,6.518417451767721,,results/baseline_eagle3/serve.json
+latency,eagle3,72965.91418100677,72699.5544800302,73752.98714961391,,,,results/baseline_eagle3/latency.json
+throughput,eagle3,,,,,19.532658613969218,0.10173259694775634,results/baseline_eagle3/throughput.json
