@@ -1,0 +1,46 @@
+[
+  {
+    "number": 30,
+    "title": "[SpecMoE] P0-1: 现有 Bench 审查与实验评估"
+  },
+  {
+    "number": 31,
+    "title": "[SpecMoE] P0-2: MAF 实证测量——Expert Trace 数据采集"
+  },
+  {
+    "number": 32,
+    "title": "[SpecMoE] P0-3: 统一 K-sweep 对比实验"
+  },
+  {
+    "number": 33,
+    "title": "[SpecMoE] P1-1: vLLM fused_moe 算子分析——识别 SD Multi-token 去重缺口"
+  },
+  {
+    "number": 34,
+    "title": "[SpecMoE] P1-2: SpecFusedMoE Kernel 原型实现"
+  },
+  {
+    "number": 35,
+    "title": "[SpecMoE] P2-1: Router Logits 分歧检测可行性研究"
+  },
+  {
+    "number": 36,
+    "title": "[SpecMoE] P2-2: Layer-wise Early Termination 实现与评估"
+  },
+  {
+    "number": 37,
+    "title": "[SpecMoE] P3-1: Expert Temporal Locality 实证分析"
+  },
+  {
+    "number": 38,
+    "title": "[SpecMoE] P4-1: 端到端集成与对比实验"
+  },
+  {
+    "number": 39,
+    "title": "[SpecMoE] P4-2: 论文撰写——Motivation & Background"
+  },
+  {
+    "number": 40,
+    "title": "[SpecMoE] P4-3: 论文撰写——System Design & Evaluation"
+  }
+]
