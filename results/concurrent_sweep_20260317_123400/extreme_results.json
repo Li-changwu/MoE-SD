@@ -1,0 +1,50 @@
+[
+  {
+    "label": "B300_baseline",
+    "num_blocks": 300,
+    "mode": "baseline",
+    "use_sd": false,
+    "wall_time_s": 513.31,
+    "throughput_tps": 14.73,
+    "total_tokens": 7562,
+    "ok_requests": 50,
+    "peak_kv_usage_pct": 99.0,
+    "avg_acceptance_rate": null
+  },
+  {
+    "label": "B300_sd",
+    "num_blocks": 300,
+    "mode": "sd",
+    "use_sd": true,
+    "wall_time_s": 561.45,
+    "throughput_tps": 13.64,
+    "total_tokens": 7656,
+    "ok_requests": 50,
+    "peak_kv_usage_pct": 100.0,
+    "avg_acceptance_rate": 45.661403508771926
+  },
+  {
+    "label": "B200_baseline",
+    "num_blocks": 200,
+    "mode": "baseline",
+    "use_sd": false,
+    "wall_time_s": 600.15,
+    "throughput_tps": 9.56,
+    "total_tokens": 5739,
+    "ok_requests": 42,
+    "peak_kv_usage_pct": 100.0,
+    "avg_acceptance_rate": null
+  },
+  {
+    "label": "B200_sd",
+    "num_blocks": 200,
+    "mode": "sd",
+    "use_sd": true,
+    "wall_time_s": 600.14,
+    "throughput_tps": 12.07,
+    "total_tokens": 7242,
+    "ok_requests": 48,
+    "peak_kv_usage_pct": 100.0,
+    "avg_acceptance_rate": 46.60491803278689
+  }
+]

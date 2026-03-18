@@ -27,12 +27,13 @@ MAX_MODEL_LEN=2048
 SWAP_SPACE=4
 SEED=42
 
-# Decode-heavy workload: short input, long output
+# Optimized: batch=1, short output for CPU-offload speed
 INPUT_LEN=128
-OUTPUT_LEN=512
+BATCH_SIZE=1
+OUTPUT_LEN=128
 
-# Latency benchmark settings
-NUM_ITERS=5
+# Latency benchmark (reduced for speed)
+NUM_ITERS=3
 NUM_ITERS_WARMUP=1
 
 # Results directory
@@ -144,6 +145,7 @@ for exp in "${EXPERIMENTS[@]}"; do
     CMD=(
         vllm bench latency
         --model "$MODEL"
+        --batch-size "$BATCH_SIZE"
         --input-len "$INPUT_LEN"
         --output-len "$OUTPUT_LEN"
         --num-iters "$NUM_ITERS"

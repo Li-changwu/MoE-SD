@@ -1,0 +1,7 @@
+label,gpu_mem,mode,use_sd,avg_latency_s,avg_tps,total_tokens,num_requests,kv_cache_tokens,kv_cache_gib,avg_acceptance_rate,avg_mean_acceptance_length
+P0.90_baseline,0.9,baseline,False,34.17,3.49,1195,10,136752,12.52,,
+P0.90_sd,0.9,sd,True,26.49,4.56,1198,10,122880,11.49,52.832142857142856,2.5853571428571427
+P0.80_baseline,0.8,baseline,False,34.19,3.49,1195,10,88096,8.07,,
+P0.80_sd,0.8,sd,True,26.52,4.56,1198,10,75216,7.03,52.853571428571435,2.585714285714286
+P0.70_baseline,0.7,baseline,False,34.25,3.49,1195,10,39440,3.61,,
+P0.70_sd,0.7,sd,True,26.52,4.56,1198,10,27552,2.58,52.814285714285724,2.585

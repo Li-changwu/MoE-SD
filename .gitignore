@@ -47,3 +47,14 @@ tools/update_github_issues.py
 scripts/update_github_issues.sh
 scripts/create_pilot_experiment_issues.py
 run_update_issues.sh
+
+# Runtime experiment logs
+logs/
+
+# Early-stage pilot runs (superseded by structured experiments)
+results/mvp_pilot_*/
+results/rerun_low_*/
+results/adaptive_comparison_*/
+
+# Quick test throughput snapshots (not paper data)
+results/test_throughput_*.json

@@ -1,0 +1,62 @@
+[
+  {
+    "blocks": 8000,
+    "base_throughput": 15.11,
+    "sd_throughput": 14.33,
+    "speedup": 0.948,
+    "base_avg_lat": 310.78,
+    "sd_avg_lat": 315.78,
+    "acc_rate": 46.596363636363634,
+    "mean_acc_len": 2.3980000000000006,
+    "peak_kv_base": 4.1,
+    "peak_kv_sd": 4.1
+  },
+  {
+    "blocks": 1500,
+    "base_throughput": 15.85,
+    "sd_throughput": 14.36,
+    "speedup": 0.906,
+    "base_avg_lat": 296.36,
+    "sd_avg_lat": 316.42,
+    "acc_rate": 46.17407407407407,
+    "mean_acc_len": 2.385925925925926,
+    "peak_kv_base": 22.1,
+    "peak_kv_sd": 22.1
+  },
+  {
+    "blocks": 1000,
+    "base_throughput": 15.83,
+    "sd_throughput": 14.33,
+    "speedup": 0.905,
+    "base_avg_lat": 296.52,
+    "sd_avg_lat": 315.78,
+    "acc_rate": 44.73148148148148,
+    "mean_acc_len": 2.3416666666666663,
+    "peak_kv_base": 32.9,
+    "peak_kv_sd": 33.1
+  },
+  {
+    "blocks": 800,
+    "base_throughput": 15.82,
+    "sd_throughput": 14.36,
+    "speedup": 0.908,
+    "base_avg_lat": 296.64,
+    "sd_avg_lat": 316.43,
+    "acc_rate": 45.00185185185188,
+    "mean_acc_len": 2.3503703703703707,
+    "peak_kv_base": 41.3,
+    "peak_kv_sd": 41.6
+  },
+  {
+    "blocks": 600,
+    "base_throughput": 15.85,
+    "sd_throughput": 14.33,
+    "speedup": 0.904,
+    "base_avg_lat": 296.8,
+    "sd_avg_lat": 315.78,
+    "acc_rate": 44.61851851851853,
+    "mean_acc_len": 2.338518518518518,
+    "peak_kv_base": 55.1,
+    "peak_kv_sd": 55.3
+  }
+]

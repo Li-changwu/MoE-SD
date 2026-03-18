@@ -1,0 +1,38 @@
+[
+  {
+    "P": 0.9,
+    "base_tps": 3.49,
+    "sd_tps": 4.56,
+    "speedup": 1.307,
+    "base_lat": 34.17,
+    "sd_lat": 26.49,
+    "acc_rate": 52.832142857142856,
+    "mean_acc_len": 2.5853571428571427,
+    "kv_gib_base": 12.52,
+    "kv_gib_sd": 11.49
+  },
+  {
+    "P": 0.8,
+    "base_tps": 3.49,
+    "sd_tps": 4.56,
+    "speedup": 1.307,
+    "base_lat": 34.19,
+    "sd_lat": 26.52,
+    "acc_rate": 52.853571428571435,
+    "mean_acc_len": 2.585714285714286,
+    "kv_gib_base": 8.07,
+    "kv_gib_sd": 7.03
+  },
+  {
+    "P": 0.7,
+    "base_tps": 3.49,
+    "sd_tps": 4.56,
+    "speedup": 1.307,
+    "base_lat": 34.25,
+    "sd_lat": 26.52,
+    "acc_rate": 52.814285714285724,
+    "mean_acc_len": 2.585,
+    "kv_gib_base": 3.61,
+    "kv_gib_sd": 2.58
+  }
+]
