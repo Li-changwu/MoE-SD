@@ -69,6 +69,10 @@ class FusedMoEHook:
         self._expert_cache = None       # ExpertWeightCache
         self._trace_collector = None    # ExpertTraceCollector
 
+        # Auto-detect verify phase: if hidden_states.shape[0] >= threshold,
+        # treat as verify batch (K+1 tokens).  0 = disabled (manual mode).
+        self._auto_verify_threshold: int = 0
+
         # Per-forward state
         self._verify_mode = False
         self._current_layer_id = 0
@@ -87,6 +91,7 @@ class FusedMoEHook:
         sdd=None,
         expert_cache=None,
         trace_collector=None,
+        auto_verify_threshold: int = 0,
     ):
         """
         Configure SpecMoE components.
@@ -96,11 +101,16 @@ class FusedMoEHook:
             sdd: SpeculationDivergenceDetector instance
             expert_cache: ExpertWeightCache instance
             trace_collector: ExpertTraceCollector instance (optional, for data collection)
+            auto_verify_threshold: if > 0, automatically enter verify mode whenever
+                hidden_states.shape[0] >= threshold (avoids manual set_verify_mode calls
+                in serve mode where vLLM scheduling is not directly observable).
+                Typical value: num_speculative_tokens + 1 (e.g. 4 for K=3).
         """
         self._spec_moe = spec_moe
         self._sdd = sdd
         self._expert_cache = expert_cache
         self._trace_collector = trace_collector
+        self._auto_verify_threshold = auto_verify_threshold
 
     def install(self) -> bool:
         """
@@ -221,7 +231,19 @@ class FusedMoEHook:
         """
         self._total_intercepts += 1
 
-        if not self._verify_mode or self._spec_moe is None:
+        # Auto-detect verify phase by batch size when threshold is configured
+        in_verify = self._verify_mode
+        if (
+            not in_verify
+            and self._auto_verify_threshold > 0
+            and self._spec_moe is not None
+        ):
+            hidden = args[0] if args else kwargs.get("hidden_states")
+            if hidden is not None and hidden.shape[0] >= self._auto_verify_threshold:
+                in_verify = True
+                self._current_layer_id = 0  # reset layer counter each verify batch
+
+        if not in_verify or self._spec_moe is None:
             # Passthrough to original
             self._total_passthrough_calls += 1
             return self._original_fn(*args, **kwargs)

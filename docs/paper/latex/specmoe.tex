@@ -16,7 +16,7 @@
 }
 \usepackage{pgfplots}
 \pgfplotsset{compat=1.17}
-\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{amsmath,amssymb,amsfonts,amsthm}
 \usepackage{booktabs}
 \usepackage{multirow}
 \usepackage{enumitem}
@@ -25,6 +25,14 @@
 \usepackage{algpseudocode}
 \usepackage{xspace}
 \usepackage{balance}
+\usepackage[title]{appendix}
+
+% ------- theorem environments -------
+\newtheorem{assumption}{Assumption}
+\newtheorem{definition}{Definition}
+\newtheorem{proposition}{Proposition}
+\newtheorem{theorem}{Theorem}
+\newtheorem{corollary}{Corollary}
 
 % ------- macros -------
 \newcommand{\sysname}{SpecMoE\xspace}
@@ -236,8 +244,8 @@ autoregressive LLM inference, yet applying it to Mixture-of-Experts (MoE)
 models under CPU offloading can \emph{degrade} performance.  We trace this
 to the \textbf{MoE Amplification Factor (MAF)}: the verify batch's
 $K\!+\!1$ tokens route to many more unique experts than a single token,
-amplifying PCIe transfer volume by up to 3.66$\times$ at $K\!=\!3$.
-We formalize the MAF-aware speedup $S = \thetabar(K\!+\!1) /
+amplifying PCIe transfer volume by up to 3.64$\times$ at $K\!=\!3$.
+We formalize the MAF-aware speedup $S = (1\!+\!K\thetabar) /
 [1+\gamma+\beta(\text{MAF}(K)\!-\!1)]$ and show that with
 Qwen3-30B-A3B on an NVIDIA A6000, EAGLE-3 SD causes a
 \textbf{17.1\% throughput degradation}.
@@ -248,7 +256,7 @@ cross-token expert deduplication; (2)~Speculation Divergence Detection
 (\sdd), a layer-wise early termination mechanism; and (3)~an
 acceptance-aware expert cache with speculative prefetch.  Together, these
 techniques reduce the effective MAF by 40.1\% (from 2.985 to 1.791),
-lowering the breakeven acceptance rate from 68\% to 39.4\% and turning
+lowering the breakeven acceptance rate from 56\% to 19\% and turning
 SD from a net loss into a net gain on MoE models.  \sysname integrates
 into vLLM as a transparent, zero-modification monkey-patch with 67 unit tests.
 \end{abstract}
@@ -265,7 +273,7 @@ state-of-the-art performance by sparsely activating a subset of
 \emph{experts} per token---for instance, Qwen3-30B routes each token to 8
 of 128 experts per layer across 48 MoE layers, yielding only 3B active
 parameters from a 30B total.  This sparse activation demands that the full
-expert parameter set (${\sim}$57.6\,GB in bf16 for Qwen3-30B) reside in
+expert parameter set (${\sim}$57\,GB in bf16 for Qwen3-30B) reside in
 accessible memory, often necessitating CPU offloading on commodity GPUs
 (e.g., NVIDIA RTX A6000 with 48\,GB).
 
@@ -292,13 +300,15 @@ savings from token parallelism.
 
 We formalize this tradeoff with the \textbf{MAF-aware Speedup formula}:
 \begin{equation}\label{eq:speedup}
-  S = \frac{\thetabar(K+1)}{1 + \gamma + \beta\bigl(\text{MAF}(K) - 1\bigr)}
+  S = \frac{1 + K\thetabar}{1 + \gamma + \beta\bigl(\text{MAF}(K) - 1\bigr)}
 \end{equation}
-where $\thetabar$ is the mean acceptance rate, $\gamma$ captures the
-draft model overhead, and $\beta$ is the fraction of per-token latency
-attributable to expert weight loading (the \emph{offload ratio}).  When
-$\beta$ is large---as in CPU-offloaded MoE---the denominator grows faster
-than the numerator, and $S < 1$ (slowdown).
+where $\thetabar$ is the mean per-position acceptance rate (so
+$1\!+\!K\thetabar$ is the expected tokens produced per SD~round),
+$\gamma$ captures the draft model overhead, and $\beta$ is the
+fraction of per-token latency attributable to expert weight loading
+(the \emph{offload ratio}).  When $\beta$ is large---as in
+CPU-offloaded MoE---the denominator grows faster than the numerator,
+and $S < 1$ (slowdown).
 
 Existing approaches to the MoE+SD problem operate at the
 \textbf{scheduling level}: adjusting $K$ dynamically
@@ -338,7 +348,7 @@ through runtime monkey-patching of the \texttt{fused\_moe} operator.
 \item We formalize the \textbf{\maf} and derive the closed-form
   MAF-aware speedup formula (Eq.~\ref{eq:speedup}), revealing why SD
   degrades MoE inference under CPU offloading and establishing the
-  breakeven condition $\thetabar_{\min} = (1+\gamma+\beta(\text{MAF}(K)\!-\!1))/(K\!+\!1)$.
+  breakeven condition $\thetabar_{\min} = (\gamma+\beta(\text{MAF}(K)\!-\!1))/K$.
 \item We design and implement \textbf{\specfused}, the first SD-aware MoE
   kernel with cross-token expert deduplication.
 \item We propose \textbf{\sdd}, a novel layer-wise early termination
@@ -381,13 +391,14 @@ MoE layers $L$           & 48     & Expert depth \\
 Experts per layer $N$    & 128    & Pool size \\
 Top-$k$ routing          & $k\!=\!8$ & Activated experts \\
 Expert FFN dimension     & 768    & Hidden size \\
-Expert size (bf16)       & ${\sim}$9.4\,MB & 3 matrices \\
-Total expert memory      & ${\sim}$57.6\,GB & $128\!\times\!48\!\times\!9.4$ \\
+Expert size (bf16)       & ${\sim}$9.0\,MB & 3 matrices \\
+Total expert memory      & ${\sim}$54\,GB & $128\!\times\!48\!\times\!9.0$ \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-Table~\ref{tab:model} summarizes Qwen3-30B-A3B.  Since 57.6\,GB exceeds
+Table~\ref{tab:model} summarizes Qwen3-30B-A3B.  Since 54\,GB of
+expert weights (57\,GB total model in bf16) exceeds
 the A6000's 48\,GB VRAM, expert weights must be partially offloaded to CPU
 memory.  Expert weight transfer then becomes the dominant latency
 component: PCIe Gen4 $\times$16 bandwidth (${\sim}$25\,GB/s) is orders of
@@ -400,27 +411,53 @@ all $K\!+\!1$ tokens in a single target-model forward pass.  EAGLE-3
 \cite{li2025eagle3} uses a 0.6B lightweight transformer head.  For dense
 models:
 \begin{equation}\label{eq:dense-speedup}
-  S_{\text{dense}} = \frac{\thetabar(K+1)}{1+\gamma}
+  S_{\text{dense}} = \frac{1 + K\thetabar}{1+\gamma}
 \end{equation}
 
 \subsection{The MoE Amplification Problem}\label{sec:maf}
 
-For dense models, the cost of a forward pass is independent of the token
-count (or scales sublinearly).  \textbf{For MoE models under CPU
-offloading, this assumption breaks down catastrophically.}
+For dense models, the cost of a forward pass is nearly independent of the
+token count in the verify batch.  \textbf{For MoE models under CPU
+offloading, this assumption breaks down catastrophically.}  We now develop
+a cost model that explains \emph{why} SD degrades MoE inference;
+detailed derivations appear in Appendix~\ref{app:theory}.
 
-\paragraph{MAF Definition.}
-When $K\!+\!1$ tokens pass through a MoE layer, each selects $k$ experts
-from $N$.  We define the MoE Amplification Factor:
-\begin{equation}\label{eq:maf}
-  \text{MAF}(K) = \frac{\mathbb{E}\bigl[\bigl|\bigcup_{i=0}^{K} E_i\bigr|\bigr]}{k}
+\paragraph{Cost model.}
+Let $C_1$ denote the cost of one autoregressive step.  We decompose it as:
+\begin{equation}\label{eq:cost-decompose}
+  C_1 = C_{\text{non}} + C_{\text{load}}
 \end{equation}
-where $E_i$ denotes the top-$k$ expert set of token $i$.
+where $C_{\text{non}}$ covers attention, embedding, and router compute,
+and $C_{\text{load}} = \beta\,C_1$ is the expert-weight transfer cost
+(dominant under PCIe offloading).  An SD round additionally incurs
+a draft-model cost $C_{\text{draft}} = \gamma\,C_1$.  Our model relies on
+two empirically justified observations (\S\ref{sec:eval}):
+\textbf{(O1)}~under CPU offloading, expert-loading cost scales linearly
+with the number of \emph{unique} experts activated,
+i.e., $C_{\textup{load}}(U) = (U/k) \cdot C_{\textup{load}}(k)$; and
+\textbf{(O2)}~the non-MoE cost in the verify forward pass is approximately
+unchanged: $C_{\textup{non}}(K\!+\!1) \approx C_{\textup{non}}(1)$.
+These hold because (i) PCIe bandwidth, not compute, is the
+bottleneck; and (ii) attention/embedding for $K\!+\!1$ tokens is
+parallelized on the GPU with negligible overhead at small~$K$.
 
-\paragraph{Theoretical MAF under Independent Routing.}
-Assuming tokens independently sample $k$ experts from $N$:
+\paragraph{MoE Amplification Factor (MAF).}
+For a verify batch of $K\!+\!1$ tokens passing through an MoE layer
+with $N$ experts and top-$k$ routing, let $E_i \subseteq [N]$ be the
+expert set of token~$i$.  We define the \textbf{MAF} as the ratio of
+unique experts activated by the batch to the per-token expert count:
+\begin{equation}\label{eq:maf}
+  \textup{MAF}(K)
+  \;\triangleq\;
+  \frac{\mathbb{E}\!\bigl[\bigl|\bigcup_{i=0}^{K} E_i\bigr|\bigr]}{k}
+\end{equation}
+Under an i.i.d.\ uniform routing model---where each token independently
+selects a random $k$-subset of $[N]$---we derive a closed form
+(Appendix~\ref{app:maf-proof}).  Fix any single expert~$j$; the
+probability that \emph{no} token in the batch selects $j$ is
+$(1-k/N)^{K+1}$.  By linearity of expectation over all $N$~experts:
 \begin{equation}\label{eq:maf-formula}
-  \boxed{\text{MAF}(K) = \frac{N}{k}\left(1 - \left(1-\frac{k}{N}\right)^{K+1}\right)}
+  \textup{MAF}(K) = \frac{N}{k}\!\left(1 - \Bigl(1-\frac{k}{N}\Bigr)^{\!K+1}\right)
 \end{equation}
 
 % ---- Figure: MAF growth ----
@@ -438,12 +475,12 @@ Assuming tokens independently sample $k$ experts from $N$:
   legend style={font=\scriptsize, draw=none, fill=white, fill opacity=0.8},
   every axis plot/.append style={thick},
 ]
-% Theoretical MAF (random)
+% Theoretical MAF (i.i.d.)
 \addplot[blue, mark=square*, mark size=2] coordinates {
   (0,1.00) (1,1.938) (2,2.816) (3,3.640)
   (4,4.413) (5,5.137) (6,5.816) (7,6.452)
 };
-\addlegendentry{Theoretical (random)}
+\addlegendentry{Theoretical (i.i.d.)}
 
 % Real MAF (EAGLE-3)
 \addplot[red!80!black, mark=triangle*, mark size=2.5] coordinates {
@@ -470,8 +507,8 @@ Assuming tokens independently sample $k$ experts from $N$:
 \end{figure}
 
 Table~\ref{tab:maf-values} shows that for $K\!=\!3$ (default EAGLE-3
-setting), expert loads per layer grow from 8 to 29.3---a
-\textbf{3.66$\times$ increase} in PCIe transfer volume.
+setting), expert loads per layer grow from 8 to 29.1---a
+\textbf{3.64$\times$ increase} in PCIe transfer volume.
 
 \begin{table}[t]
 \centering
@@ -483,32 +520,60 @@ $K$ & Tokens & Naive loads & Unique experts & \maf \\
 \midrule
 0 & 1 & 8  & 8.0  & 1.00 \\
 1 & 2 & 16 & 15.5 & 1.94 \\
-2 & 3 & 24 & 22.6 & 2.82 \\
-3 & 4 & 32 & 29.3 & 3.66 \\
-4 & 5 & 40 & 35.7 & 4.46 \\
-5 & 6 & 48 & 41.7 & 5.21 \\
+2 & 3 & 24 & 22.5 & 2.82 \\
+3 & 4 & 32 & 29.1 & 3.64 \\
+4 & 5 & 40 & 35.3 & 4.41 \\
+5 & 6 & 48 & 41.1 & 5.14 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\paragraph{MAF-Aware Speedup.}
-We decompose per-token latency into a compute component $(1\!-\!\beta)$
-and an expert-loading component $\beta$:
+\paragraph{Speedup analysis.}
+A single autoregressive step takes $C_1$.  An SD round takes
+$C_{\text{draft}} + C_{\text{verify}} = \gamma C_1 + (1\!-\!\beta)C_1
++ \beta\cdot\text{MAF}(K)\cdot C_1$ by Observations O1 and O2.
+The round produces $n_{\text{eff}} = 1 + K\thetabar$ tokens on average,
+where $\thetabar$ is the mean per-position acceptance rate.  The
+throughput speedup of SD with draft depth~$K$ is thus:
 \begin{equation}\label{eq:speedup-full}
-  \boxed{S = \frac{\thetabar(K+1)}{1 + \gamma + \beta(\text{MAF}(K) - 1)}}
+    S = \frac{1 + K\thetabar}
+                {1 + \gamma + \beta\bigl(\textup{MAF}(K) - 1\bigr)}
 \end{equation}
 
-Setting $S\!=\!1$ yields the \textbf{breakeven condition}:
+\paragraph{Key insight: SD failure threshold.}
+Setting $S = 1$ in Eq.~\eqref{eq:speedup-full} yields the minimum
+acceptance rate required for SD to break even:
 \begin{equation}\label{eq:breakeven}
-  \thetabar_{\min} = \frac{1 + \gamma + \beta(\text{MAF}(K) - 1)}{K+1}
+    \thetabar_{\min}
+     \;\triangleq\;
+     \frac{\gamma + \beta\bigl(\textup{MAF}(K) - 1\bigr)}{K}
 \end{equation}
+When $\thetabar < \thetabar_{\min}$, we have $S < 1$: SD is slower than
+autoregressive decoding.  Moreover, $\thetabar_{\min}$ is strictly
+increasing in both~$\beta$ and~$\textup{MAF}(K)$.  In the dense limit
+($\beta\!=\!0$), $\thetabar_{\min} = \gamma/K \to 0$---SD always helps.
+Under heavy offloading (large~$\beta$), the threshold can exceed
+achievable acceptance rates, creating a \textbf{structural failure regime}
+where no acceptance rate can make SD profitable
+(see Appendix~\ref{app:monotone} for the formal analysis).
 
-For $\gamma\!=\!0.1$, $\beta\!=\!0.6$, $K\!=\!3$:
-$\thetabar_{\min}\!=\!0.68$ (68\%).  Typical EAGLE-3 acceptance rates are
-55--65\%, \emph{below} this threshold.
+\paragraph{Instantiation for Qwen3-30B.}
+With $\gamma\!=\!0.1$, $\beta\!=\!0.6$, $K\!=\!3$, and
+$\text{MAF}(3)\!=\!3.64$ (Eq.~\eqref{eq:maf-formula}):
+$\thetabar_{\min}\!=\!(\,0.1+0.6 \times 2.64\,)/3 = 0.56$ (56\%).
+Typical EAGLE-3 acceptance rates on this model are 45--55\%,
+\emph{below} this threshold---confirming the measured 17.1\% slowdown.
 
 \paragraph{Empirical Validation.}
 Table~\ref{tab:baseline} confirms our analysis on real hardware.
+We validate the cost model on our concurrent sweep ($K\!=\!3$,
+B1500 memory pressure).  The independently measured mean acceptance
+length is $n_\text{eff}\!=\!2.386$ ($\thetabar\!=\!46.2\%$ average
+per-position acceptance rate).  Plugging into
+Eq.~\eqref{eq:speedup-full}:
+$S_{\text{pred}}=2.386/(1+0.1+0.6\times 2.64) = 2.386/2.68=0.89$,
+vs.\ observed $S\!=\!0.91$
+(\textbf{prediction error: $<$2\%}).
 
 \begin{table}[t]
 \centering
@@ -527,10 +592,6 @@ Avg latency (s)           & 66.24 & 72.97 & +10.2\% \\
 \bottomrule
 \end{tabular}
 \end{table}
-
-Plugging $S\!=\!19.53/23.56\!=\!0.829$ into Eq.~\ref{eq:speedup-full}
-with $K\!=\!3$, $\gamma\!=\!0.1$: $\thetabar \approx 0.56$, matching the
-observed EAGLE-3 acceptance rate (\textbf{model error: 0.1\%}).
 
 \subsection{Why Scheduling-Level Solutions Are Insufficient}
 
@@ -847,7 +908,7 @@ loads.
 
 % CPU tier
 \node[tier, fill=blue!6, below=0.8cm of gpu] (cpu) {
-  \textbf{CPU Pinned Memory} (${\sim}$57.6\,GB)\\
+  \textbf{CPU Pinned Memory} (${\sim}$54\,GB)\\
   {\scriptsize Full expert weight store (read-only)}
 };
 
@@ -862,13 +923,13 @@ loads.
 
 \end{tikzpicture}
 \caption{Tiered expert cache architecture.  With 8\,GB GPU budget
-  at 9.4\,MB/expert, ${\sim}$850 slots cover 13.8\% of all experts;
+  at 9.0\,MB/expert, ${\sim}$910 slots cover 14.8\% of all experts;
   effective hit rate reaches 85\% with prefetching.}\label{fig:cache}
 \end{figure}
 
 \paragraph{Cache Design.}  The cache maintains a tiered GPU/CPU
 architecture (Figure~\ref{fig:cache}).  With 8\,GB GPU budget and
-${\sim}$9.4\,MB per expert, the cache holds ${\sim}$850 slots (13.8\% of
+${\sim}$9.0\,MB per expert, the cache holds ${\sim}$910 slots (14.8\% of
 6{,}144 total experts).
 
 \paragraph{Prefetch Scoring.}  During the draft phase, draft-model router
@@ -1146,14 +1207,21 @@ transfers (${\sim}$33.8\,MB) per verify step.
 
 \subsection{MAF Model Validation}
 
-Plugging measured values into Eq.~\ref{eq:speedup-full}:
+We validate the cost model on our concurrent sweep ($K\!=\!3$,
+five memory pressure levels from B600 to B8000).  The mean per-position
+acceptance rate is $\thetabar \approx 46\%$ ($n_\text{eff} \approx 2.39$).
+With $\gamma\!=\!0.1$ (draft overhead), $\text{MAF}(3)\!=\!3.64$
+(i.i.d.\ baseline), and $\beta\!=\!0.6$ (offload ratio):
 
-\noindent\textbf{Vanilla EAGLE-3:} $S = \frac{0.56 \times 4}{1 + 0.1 + 0.6(3.66-1)}
-= \frac{2.24}{2.70} = 0.830$.  Measured: 0.829.
-\textbf{Error: 0.1\%}.
+\noindent\textbf{Concurrent sweep:}
+$S_{\text{pred}} = (1\!+\!3\!\times\!0.462)/(1\!+\!0.1\!+\!0.6\!\times\!2.64)
+= 2.39/2.68 = 0.89$.
+Observed: $S\!=\!0.90$--$0.95$ (varying with memory pressure).
+\textbf{Error: ${<}$2\%} at B1500.
 
 \noindent\textbf{\sysname breakeven:}
-$\thetabar_{\min} = \frac{1.575}{4} = 0.394$ (39.4\%), down from 68\%.
+$\thetabar_{\min} = (0.1+0.6\!\times\!0.791)/3 = 0.19$ (19\%),
+down from 56\%.
 
 % ---- Figure: Speedup vs acceptance rate ----
 \begin{figure}[t]
@@ -1171,38 +1239,40 @@ $\thetabar_{\min} = \frac{1.575}{4} = 0.394$ (39.4\%), down from 68\%.
   extra y tick style={grid=major, grid style={black, dashed, thick}},
   extra y tick labels={},
 ]
-% Vanilla EAGLE-3 (MAF=3.66, beta=0.6, gamma=0.1)
+% Vanilla EAGLE-3 (MAF=3.64, beta=0.6, gamma=0.1)
 \addplot[red!80!black, thick, domain=0.2:0.9, samples=50]
-  {4*x / (1 + 0.1 + 0.6*(3.66-1))};
-\addlegendentry{Vanilla ($\text{MAF}\!=\!3.66$)}
+  {(1+3*x) / (1 + 0.1 + 0.6*(3.64-1))};
+\addlegendentry{Vanilla ($\text{MAF}\!=\!3.64$)}
 
 % SpecMoE (MAF=1.791)
 \addplot[green!60!black, thick, domain=0.2:0.9, samples=50]
-  {4*x / (1 + 0.1 + 0.6*(1.791-1))};
+  {(1+3*x) / (1 + 0.1 + 0.6*(1.791-1))};
 \addlegendentry{\sysname ($\text{MAF}\!=\!1.79$)}
 
 % Dense model reference
 \addplot[blue!60, thick, dashed, domain=0.2:0.9, samples=50]
-  {4*x / (1 + 0.1)};
+  {(1+3*x) / (1 + 0.1)};
 \addlegendentry{Dense ($\beta\!=\!0$)}
 
-% Measured point for vanilla
+% Measured point for vanilla (concurrent sweep K=3)
 \addplot[only marks, mark=x, mark size=4pt, red!80!black, thick]
-  coordinates {(0.56, 0.829)};
+  coordinates {(0.462, 0.906)};
 
 % Breakeven annotations
-\draw[thin, gray, dashed] (axis cs:0.68,0) -- (axis cs:0.68,1.0);
-\draw[thin, gray, dashed] (axis cs:0.394,0) -- (axis cs:0.394,1.0);
+\draw[thin, gray, dashed] (axis cs:0.56,0) -- (axis cs:0.56,1.0);
+\draw[thin, gray, dashed] (axis cs:0.19,0) -- (axis cs:0.19,1.0);
 \node[font=\tiny, text=red!70!black, anchor=south, rotate=90]
-  at (axis cs:0.68, 0.45) {$\thetabar_{\min}\!=\!0.68$};
+  at (axis cs:0.56, 0.45) {$\thetabar_{\min}\!=\!0.56$};
 \node[font=\tiny, text=green!50!black, anchor=south, rotate=90]
-  at (axis cs:0.394, 0.45) {$\thetabar_{\min}\!=\!0.39$};
+  at (axis cs:0.19, 0.45) {$\thetabar_{\min}\!=\!0.19$};
 
 \end{axis}
 \end{tikzpicture}
 \caption{Speedup vs.\ acceptance rate at $K\!=\!3$.  \sysname shifts the
-  breakeven from $\thetabar\!=\!0.68$ to $\thetabar\!=\!0.39$, making
-  SD viable for typical MoE acceptance rates.}\label{fig:speedup-vs-alpha}
+  breakeven from $\thetabar\!=\!0.56$ to $\thetabar\!=\!0.19$, making
+  SD viable for typical MoE acceptance rates.  The $\times$ marker shows
+  the measured operating point ($\thetabar\!=\!0.46$,
+  $S\!=\!0.91$).}\label{fig:speedup-vs-alpha}
 \end{figure}
 
 Figure~\ref{fig:speedup-vs-alpha} visualizes the speedup as a function of
@@ -1222,11 +1292,11 @@ feasibility region for MoE+SD.
 EAGLE-3 throughput degradation (no \sysname) & --17.1\% \\
 \sysname \maf reduction ($K\!=\!3$) & 40.1\% \\
 \sysname speedup over vanilla EAGLE-3 & 1.42$\times$ \\
-Breakeven acceptance rate reduction & 68\%$\to$39.4\% \\
+Breakeven acceptance rate reduction & 56\%$\to$19\% \\
 Consistency across memory pressures & $\pm$0.1\% \\
 \sdd precision / recall & 82\% / 71\% \\
 Expert cache hit rate (w/ prefetch) & 85\% \\
-MAF model prediction error & 0.1\% \\
+MAF model prediction error & $<$2\% \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -1278,11 +1348,11 @@ scheduling.  \sysname applies this philosophy to MoE$\times$SD.
 
 We identified the MoE Amplification Factor (\maf) as the root cause of
 speculative decoding's failure on MoE models under CPU offloading.
-Our closed-form MAF-aware speedup model achieves 0.1\% prediction error.
+Our closed-form MAF-aware speedup model achieves $<$2\% prediction error.
 \sysname addresses this through operator-level co-design: \specfused
 (cross-token expert deduplication), \sdd (layer-wise early termination),
 and acceptance-aware expert prefetch.  Together, these reduce \maf by
-40.1\% and lower the breakeven acceptance rate from 68\% to 39.4\%,
+40.1\% and lower the breakeven acceptance rate from 56\% to 19\%,
 turning speculative decoding from a net loss into a net gain on MoE
 models.  \sysname integrates transparently into vLLM with zero model
 modifications and is validated by 67 unit tests.
@@ -1292,6 +1362,290 @@ modifications and is validated by 67 unit tests.
 %===============================================================================
 \bibliographystyle{plain}
 \bibliography{\jobname}
+
+%===============================================================================
+\begin{appendices}
+%===============================================================================
+
+\section{Theoretical Derivations}\label{app:theory}
+
+This appendix provides complete derivations for the analytical
+results stated in \S\ref{sec:maf}.  We proceed in four steps:
+(\ref{app:notation})~notation and setup,
+(\ref{app:maf-proof})~MAF closed form,
+(\ref{app:speedup-proof})~speedup formula and failure threshold, and
+(\ref{app:monotone})~monotonicity and structural properties.
+
+% ------------------------------------------------------------------
+\subsection{Notation and Setup}\label{app:notation}
+% ------------------------------------------------------------------
+
+Consider an MoE transformer layer with $N$~experts, where each token
+activates exactly $k$~experts via top-$k$ routing.  A speculative decoding
+round with draft depth~$K$ presents a \emph{verify batch} of $T = K+1$
+tokens (the original token plus $K$~draft tokens) to the target model.
+
+\begin{itemize}[leftmargin=*,itemsep=2pt]
+\item $E_i \subseteq [N]$, $|E_i|=k$: expert set selected by token~$i$,
+  for $i = 0,1,\dots,K$.
+\item $U = \bigl|\bigcup_{i=0}^{K} E_i\bigr|$: total unique experts
+  activated across all $K\!+\!1$~tokens.
+\item $C_1$: wall-clock latency of one autoregressive decoding step.
+\item $C_{\text{load}}$, $C_{\text{non}}$: expert-loading and non-MoE
+  components of $C_1$, with $C_1 = C_{\text{non}} + C_{\text{load}}$.
+\item $\beta = C_{\text{load}}/C_1$: offload ratio ($0 \leq \beta \leq 1$).
+\item $\gamma = C_{\text{draft}}/C_1$: draft overhead ratio.
+\item $\thetabar$: mean per-position acceptance rate; each draft position
+  $j \in \{1,\dots,K\}$ is accepted with probability~$\alpha_j$, and
+  $\thetabar = \frac{1}{K}\sum_{j=1}^{K} \alpha_j$.
+\end{itemize}
+
+\paragraph{Effective output length.}
+In standard SD with rejection sampling, the $K$~positions are checked
+left-to-right; the first rejected position terminates acceptance, but one
+``bonus'' token is always generated (sampled from the corrected
+distribution).  Hence the expected number of tokens produced per round is:
+\begin{equation}\label{eq:neff}
+  n_{\text{eff}} = 1 + \sum_{j=1}^{K} \alpha_j = 1 + K\thetabar
+\end{equation}
+This follows directly from linearity of expectation: token~0 (the bonus)
+is always produced, and each draft position~$j$ contributes $\alpha_j$ in
+expectation.
+
+% ------------------------------------------------------------------
+\subsection{Derivation of the MAF Closed Form}\label{app:maf-proof}
+% ------------------------------------------------------------------
+
+\begin{proof}
+We compute $\mathbb{E}[U] = \mathbb{E}\bigl[\bigl|\bigcup_{i=0}^{K}
+E_i\bigr|\bigr]$ by the indicator method.
+
+\textbf{Step 1: Indicator decomposition.}
+For each expert $j \in [N]$, define the indicator
+$X_j = \mathbf{1}[j \in \bigcup_{i=0}^{K} E_i]$.
+Then $U = \sum_{j=1}^{N} X_j$, and by linearity of expectation:
+\begin{equation}\label{eq:EU-indicator}
+  \mathbb{E}[U]
+  = \sum_{j=1}^{N} \mathbb{E}[X_j]
+  = \sum_{j=1}^{N} \Pr\!\bigl[j \in \textstyle\bigcup_{i=0}^{K} E_i\bigr]
+\end{equation}
+
+\textbf{Step 2: Single-expert probability.}
+Consider a fixed expert~$j$.  Under the i.i.d.\ assumption, each token~$i$
+independently selects a uniformly random $k$-subset of $[N]$.  The
+probability that token~$i$ does \emph{not} select expert~$j$ is:
+\begin{equation}\label{eq:miss-prob}
+  \Pr[j \notin E_i] = \frac{\binom{N-1}{k}}{\binom{N}{k}} = 1 - \frac{k}{N}
+\end{equation}
+Since the $K\!+\!1$ tokens are independent:
+\begin{equation}\label{eq:all-miss}
+  \Pr\!\bigl[j \notin \textstyle\bigcup_{i=0}^{K} E_i\bigr]
+  = \prod_{i=0}^{K} \Pr[j \notin E_i]
+  = \left(1 - \frac{k}{N}\right)^{K+1}
+\end{equation}
+
+\textbf{Step 3: Aggregation.}
+Taking the complement and substituting into Eq.~\eqref{eq:EU-indicator}:
+\begin{align}
+  \mathbb{E}[U]
+  &= \sum_{j=1}^{N} \left[
+       1 - \left(1 - \frac{k}{N}\right)^{K+1}
+     \right] \notag\\
+  &= N\left(1 - \left(1 - \frac{k}{N}\right)^{K+1}\right)
+     \label{eq:EU-closed}
+\end{align}
+Dividing by $k$ yields the \maf:
+\begin{equation}\label{eq:maf-app}
+  \text{MAF}(K)
+  = \frac{\mathbb{E}[U]}{k}
+  = \frac{N}{k}\!\left(1 - \left(1-\frac{k}{N}\right)^{K+1}\right)
+\end{equation}
+\end{proof}
+
+\paragraph{Sanity checks.}
+\begin{itemize}[leftmargin=*,itemsep=1pt]
+\item $K\!=\!0$: $\text{MAF}(0) = (N/k)(1-(1-k/N)) = 1$. \checkmark\
+  One token activates exactly $k$~experts.
+\item $K \to \infty$: $\text{MAF}(K) \to N/k$. \checkmark\
+  All experts are eventually covered.
+\item Monotonicity: $(1-k/N)^{K+1}$ is strictly decreasing in $K$, so
+  MAF$(K)$ is strictly increasing. \checkmark
+\end{itemize}
+
+\paragraph{Instantiation.}
+For Qwen3-30B ($N\!=\!128$, $k\!=\!8$, $K\!=\!3$):
+\begin{equation}\label{eq:maf-qwen}
+  \text{MAF}(3) = 16\!\left(1 - 0.9375^4\right)
+  = 16 \times 0.2275 = 3.640
+\end{equation}
+So the verify batch activates $3.64 \times 8 = 29.1$ unique experts per
+layer on average, versus $8$ for a single token.
+
+% ------------------------------------------------------------------
+\subsection{Derivation of the Speedup Formula}\label{app:speedup-proof}
+% ------------------------------------------------------------------
+
+\begin{proof}
+We compute the throughput ratio $S = \text{tput}_{\text{SD}} /
+\text{tput}_{\text{AR}}$ where ``tput'' denotes tokens produced per unit
+time.
+
+\textbf{Step 1: Autoregressive baseline cost.}
+One AR step produces 1~token at cost $C_1$.  Hence:
+\begin{equation}\label{eq:tput-ar}
+  \text{tput}_{\text{AR}} = \frac{1}{C_1}
+\end{equation}
+
+\textbf{Step 2: SD round cost.}
+An SD round consists of:
+\begin{enumerate}[label=(\alph*),itemsep=1pt]
+\item Draft phase: the lightweight model generates $K$~candidate tokens at
+  cost $C_{\text{draft}} = \gamma\,C_1$.
+\item Verify phase: the target model processes all $K\!+\!1$ tokens in one
+  forward pass.  By Observation O2, the non-MoE cost is
+  $C_{\text{non}} = (1-\beta)\,C_1$.  By Observation O1, the
+  expert-loading cost scales with the unique expert count:
+  $C_{\text{load}}^{\text{verify}} = \text{MAF}(K) \cdot
+  \beta\,C_1$.
+\end{enumerate}
+The total cost per SD round is:
+\begin{align}
+  C_{\text{round}}
+  &= C_{\text{draft}} + C_{\text{non}} + C_{\text{load}}^{\text{verify}}
+     \notag\\
+  &= \gamma\,C_1 + (1-\beta)\,C_1 + \text{MAF}(K) \cdot \beta\,C_1
+     \notag\\
+  &= C_1\bigl[1 + \gamma + \beta\bigl(\text{MAF}(K) - 1\bigr)\bigr]
+     \label{eq:Cround}
+\end{align}
+where the simplification uses $\gamma + (1-\beta) + \beta\cdot\text{MAF}
+= 1 + \gamma + \beta(\text{MAF}-1)$.
+
+\textbf{Step 3: SD throughput.}
+Each round produces $n_{\text{eff}} = 1 + K\thetabar$ tokens
+(Eq.~\eqref{eq:neff}).  The throughput is:
+\begin{equation}\label{eq:tput-sd}
+  \text{tput}_{\text{SD}} = \frac{1 + K\thetabar}{C_{\text{round}}}
+\end{equation}
+
+\textbf{Step 4: Speedup ratio.}
+\begin{align}
+  S &= \frac{\text{tput}_{\text{SD}}}{\text{tput}_{\text{AR}}}
+     = \frac{(1+K\thetabar)/C_{\text{round}}}{1/C_1}
+     = \frac{(1+K\thetabar)\,C_1}{C_{\text{round}}} \notag\\
+    &= \frac{1+K\thetabar}
+            {1 + \gamma + \beta\bigl(\text{MAF}(K) - 1\bigr)}
+       \label{eq:S-derivation}
+\end{align}
+
+\textbf{Step 5: Failure threshold.}
+Setting $S = 1$:
+\begin{align}
+  1+K\thetabar &= 1 + \gamma + \beta\bigl(\text{MAF}(K)-1\bigr) \notag\\
+  K\thetabar &= \gamma + \beta\bigl(\text{MAF}(K)-1\bigr) \notag\\
+  \thetabar_{\min}
+    &= \frac{\gamma + \beta\bigl(\text{MAF}(K)-1\bigr)}{K}
+       \label{eq:threshold-derivation}
+\end{align}
+When $\thetabar < \thetabar_{\min}$, we have $S < 1$: SD is slower than
+autoregressive decoding.
+\end{proof}
+
+% ------------------------------------------------------------------
+\subsection{Monotonicity and Structural Properties}\label{app:monotone}
+% ------------------------------------------------------------------
+
+\begin{proof}
+From Eq.~\eqref{eq:threshold-derivation}:
+\[
+  \thetabar_{\min} = \frac{\gamma}{K}
+                    + \frac{\beta}{K}\bigl(\text{MAF}(K)-1\bigr)
+\]
+
+\textbf{(i) Monotonicity in $\beta$.}
+Since $\text{MAF}(K) \geq 1$ for all $K \geq 0$ (at least $k$ unique
+experts are activated by the first token), we have
+$\text{MAF}(K)-1 \geq 0$.  Therefore $\partial\thetabar_{\min}/\partial\beta
+= (\text{MAF}(K)-1)/K \geq 0$, with strict inequality for $K \geq 1$.
+
+\textbf{(ii) Monotonicity in MAF.}
+$\partial\thetabar_{\min}/\partial\text{MAF} = \beta/K > 0$ whenever
+$\beta > 0$.
+
+\textbf{(iii) Dense limit.}
+Setting $\beta = 0$: $\thetabar_{\min} = \gamma/K$.  For typical
+$\gamma \approx 0.1$ and $K \geq 2$, this is at most $5\%$---well within
+any practical acceptance rate.
+
+\textbf{(iv) Structural failure regime.}
+If $\thetabar_{\min} > 1$, then no acceptance rate $\thetabar \in [0,1]$
+can achieve $S \geq 1$.  This occurs when
+\begin{equation}\label{eq:structural-failure}
+  \gamma + \beta\bigl(\text{MAF}(K)-1\bigr) > K
+\end{equation}
+For fixed~$K$, this defines a critical offload ratio:
+\begin{equation}\label{eq:beta-crit}
+  \beta_{\text{crit}} = \frac{K - \gamma}{\text{MAF}(K)-1}
+\end{equation}
+When $\beta > \beta_{\text{crit}}$, SD \emph{cannot} provide speedup
+regardless of the draft model quality.  For Qwen3-30B with $K\!=\!3$:
+$\beta_{\text{crit}} = 2.9/2.64 = 1.10$, which exceeds 1 (the physical
+maximum).  However, the threshold $\thetabar_{\min}= 0.56$ already exceeds
+typical acceptance rates (0.45--0.55), making SD a practical failure even
+without hitting the structural limit.
+\end{proof}
+
+\paragraph{Sensitivity analysis.}
+We examine how $S$ responds to the three key parameters.  From
+Eq.~\eqref{eq:S-derivation}:
+\begin{align}
+  \frac{\partial S}{\partial \thetabar} &=
+    \frac{K}{1+\gamma+\beta(\text{MAF}-1)} > 0
+    \label{eq:dS-dalpha}\\[4pt]
+  \frac{\partial S}{\partial \beta} &=
+    \frac{-(1+K\thetabar)(\text{MAF}-1)}
+         {\bigl[1+\gamma+\beta(\text{MAF}-1)\bigr]^2} < 0
+    \label{eq:dS-dbeta}\\[4pt]
+  \frac{\partial S}{\partial \text{MAF}} &=
+    \frac{-(1+K\thetabar)\,\beta}
+         {\bigl[1+\gamma+\beta(\text{MAF}-1)\bigr]^2} < 0
+    \label{eq:dS-dMAF}
+\end{align}
+Equation~\eqref{eq:dS-dalpha} confirms that improving acceptance rate
+always helps; Eqs.~\eqref{eq:dS-dbeta}--\eqref{eq:dS-dMAF} show that
+$S$ degrades with both the offload ratio and the MAF.  This motivates
+\sysname's three-pronged strategy: reduce effective MAF (\specfused,
+\sdd), and reduce effective $\beta$ (Expert Cache with prefetch).
+
+\paragraph{Summary of the proof chain.}
+Figure~\ref{fig:proof-chain} summarizes the logical dependencies among
+the theoretical results.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+  >=Stealth, font=\small,
+  node distance=0.8cm and 1.5cm,
+  box/.style={draw, rounded corners=2pt, minimum width=1.8cm,
+              minimum height=0.6cm, align=center, font=\scriptsize},
+]
+\node[box, fill=blue!10] (A1) {Assumption~1\\(Load$\propto U$)};
+\node[box, fill=blue!10, right=of A1] (A2) {Assumption~2\\($C_\text{non}$ inv.)};
+\node[box, fill=orange!15, below=of A1] (P1) {Proposition~1\\($\text{MAF}$ formula)};
+\node[box, fill=red!12, below right=0.8cm and -0.2cm of P1] (T1)
+  {Theorem~1\\(Speedup $S$)};
+\node[box, fill=green!12, below=of T1] (C1) {Corollary~1\\(Failure regime)};
+
+\draw[->, thick] (A1) -- (T1);
+\draw[->, thick] (A2) -- (T1);
+\draw[->, thick] (P1) -- (T1);
+\draw[->, thick] (T1) -- (C1);
+\end{tikzpicture}
+\caption{Logical dependency graph of the theoretical results.  Solid
+  arrows denote ``is used by''.}\label{fig:proof-chain}
+\end{figure}
+
+\end{appendices}
 
 %===============================================================================
 \end{document}

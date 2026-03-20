@@ -15,5 +15,8 @@ dependencies = [
 [project.scripts]
 moe-sd-runtime = "vllm_moe_sd_scheduler.cli:main"
 
+[project.entry-points."vllm.general_plugins"]
+elmm = "adapters.vllm_elmm_plugin:register"
+
 [tool.setuptools]
 packages = ["adapters", "controllers", "collectors", "tools", "vllm_moe_sd_scheduler"]

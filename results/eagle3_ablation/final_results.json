@@ -1,0 +1,110 @@
+[
+  {
+    "config_id": 1,
+    "label": "C1_no_sd_baseline",
+    "description": "No-SD Baseline (pure AR)",
+    "status": "ok",
+    "repetitions": 1,
+    "output_tps": 1.9882213444571217,
+    "mean_ttft_ms": 50860.531579254064,
+    "mean_e2e_s": 50.86076017718391,
+    "total_output_tokens": 4955.0,
+    "total_time_s": 2492.177248682012,
+    "p50_ttft_ms": 61096.737482002936,
+    "p95_ttft_ms": 67448.16691800952,
+    "p50_e2e_s": 61.09697569801938,
+    "p95_e2e_s": 67.44838932005223
+  },
+  {
+    "config_id": 2,
+    "label": "C2_eagle3_vanilla",
+    "description": "EAGLE-3 Vanilla (K=3)",
+    "status": "ok",
+    "repetitions": 1,
+    "output_tps": 2.008922828634473,
+    "mean_ttft_ms": 49930.08618460902,
+    "mean_e2e_s": 49.930301462680255,
+    "total_output_tokens": 4915.0,
+    "total_time_s": 2446.5847716713324,
+    "p50_ttft_ms": 56346.14998498,
+    "p95_ttft_ms": 71295.23860802874,
+    "p50_e2e_s": 56.34640818007756,
+    "p95_e2e_s": 71.29546257399488,
+    "acceptance_length": 1.2147239263803682,
+    "acceptance_rate": 0.4049079754601227,
+    "spec_decode_metrics": {
+      "drafts": 2282.0,
+      "draft_tokens": 6846.0,
+      "accepted_tokens": 2772.0
+    }
+  },
+  {
+    "config_id": 3,
+    "label": "C3_specmoe_dedup",
+    "description": "+ SpecFusedMoE (expert dedup)",
+    "status": "ok",
+    "repetitions": 1,
+    "output_tps": 2.1202634621990937,
+    "mean_ttft_ms": 47462.11395680677,
+    "mean_e2e_s": 47.462334212395646,
+    "total_output_tokens": 4931.0,
+    "total_time_s": 2325.6543764073867,
+    "p50_ttft_ms": 53166.10231308732,
+    "p95_ttft_ms": 72691.44429790322,
+    "p50_e2e_s": 53.16637333203107,
+    "p95_e2e_s": 72.69167229800951,
+    "acceptance_length": 1.2087336244541484,
+    "acceptance_rate": 0.4029112081513828,
+    "spec_decode_metrics": {
+      "drafts": 2290.0,
+      "draft_tokens": 6870.0,
+      "accepted_tokens": 2768.0
+    }
+  },
+  {
+    "config_id": 4,
+    "label": "C4_specmoe_sdd",
+    "description": "+ SDD (early termination)",
+    "status": "ok",
+    "repetitions": 1,
+    "output_tps": 2.120287671137534,
+    "mean_ttft_ms": 47461.57381085593,
+    "mean_e2e_s": 47.46179229879457,
+    "total_output_tokens": 4931.0,
+    "total_time_s": 2325.627822640934,
+    "p50_ttft_ms": 53167.16732108034,
+    "p95_ttft_ms": 72692.0346589759,
+    "p50_e2e_s": 53.1674303150503,
+    "p95_e2e_s": 72.69226347003132,
+    "acceptance_length": 1.2087336244541484,
+    "acceptance_rate": 0.4029112081513828,
+    "spec_decode_metrics": {
+      "drafts": 2290.0,
+      "draft_tokens": 6870.0,
+      "accepted_tokens": 2768.0
+    }
+  },
+  {
+    "config_id": 5,
+    "label": "C5_specmoe_full",
+    "description": "Full SpecMoE (+ cache + prefetch)",
+    "status": "ok",
+    "repetitions": 1,
+    "output_tps": 2.1202468745375302,
+    "mean_ttft_ms": 47462.49144491787,
+    "mean_e2e_s": 47.46270553195583,
+    "total_output_tokens": 4931.0,
+    "total_time_s": 2325.6725710658357,
+    "p50_ttft_ms": 53165.24153901264,
+    "p95_ttft_ms": 72696.95400504861,
+    "p50_e2e_s": 53.16546470706817,
+    "p95_e2e_s": 72.69717791094445,
+    "acceptance_length": 1.2087336244541484,
+    "acceptance_rate": 0.4029112081513828,
+    "spec_decode_metrics": {
+      "drafts": 2290.0,
+      "draft_tokens": 6870.0,
+      "accepted_tokens": 2768.0
+    }
+  }
+]
