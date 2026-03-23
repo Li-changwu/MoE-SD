@@ -48,6 +48,18 @@ def register():
         cache_gb = float(os.environ.get("ELMM_CACHE_GB", "8"))
         enable_prefetch = os.environ.get("ELMM_PREFETCH", "1") == "1"
         log_interval = int(os.environ.get("ELMM_LOG_INTERVAL", "0"))
+        enable_locality = os.environ.get("ELMM_LOCALITY", "1") == "1"
+        locality_export_dir = os.environ.get("ELMM_LOCALITY_DIR", "")
+        locality_export_interval = int(os.environ.get("ELMM_LOCALITY_INTERVAL", "0"))
+        enable_adaptive = os.environ.get("ELMM_ADAPTIVE_BUDGET", "1") == "1"
+        rebalance_interval = int(os.environ.get("ELMM_REBALANCE_INTERVAL", "5000"))
+        pool_direct = os.environ.get("ELMM_POOL_DIRECT", "1") == "1"
+        direct_dispatch = os.environ.get("ELMM_DIRECT_DISPATCH", "1") == "1"
+        gpu_cache = os.environ.get("ELMM_GPU_CACHE", "1") == "1"
+        phase_profiling = os.environ.get("ELMM_PROFILE", "0") == "1"
+        stale_remap = int(os.environ.get("ELMM_STALE_REMAP", "0"))
+        stale_remap_warmup = int(os.environ.get("ELMM_STALE_REMAP_WARMUP", "32"))
+        stale_remap_max_interval = int(os.environ.get("ELMM_STALE_REMAP_MAX_INTERVAL", "128"))
 
         from adapters.elmm_plugin import ELMMConfig, activate_elmm
 
@@ -55,11 +67,32 @@ def register():
             gpu_cache_budget_bytes=int(cache_gb * 1024**3),
             enable_prefetch=enable_prefetch,
             log_interval=log_interval,
+            enable_locality_collection=enable_locality,
+            locality_export_dir=locality_export_dir,
+            locality_export_interval=locality_export_interval,
+            enable_adaptive_budget=enable_adaptive,
+            rebalance_interval=rebalance_interval,
+            enable_pool_direct=pool_direct,
+            enable_direct_dispatch=direct_dispatch,
+            enable_gpu_cache=gpu_cache,
+            enable_phase_profiling=phase_profiling,
+            stale_remap_interval=stale_remap,
+            stale_remap_warmup=stale_remap_warmup,
+            stale_remap_max_interval=stale_remap_max_interval,
         )
 
         model = self.model_runner.model
         activate_elmm(model, config)
         print(f"[ELMM] activate_elmm() complete", file=sys.stderr, flush=True)
+
+        # Install draft-guided prefetch hook (if prefetch enabled)
+        if enable_prefetch:
+            from adapters.draft_prefetch_hook import install_draft_prefetch
+            pfh = install_draft_prefetch(
+                __import__("adapters.elmm_plugin", fromlist=["get_elmm_manager"]).get_elmm_manager()
+            )
+            if pfh:
+                print(f"[ELMM] Draft-guided prefetch hook installed", file=sys.stderr, flush=True)
 
     Worker.load_model = _patched_load_model
     print(f"[ELMM] Worker.load_model patched successfully", file=sys.stderr, flush=True)

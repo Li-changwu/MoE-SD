@@ -1,0 +1,40 @@
+{
+  "timestamp": "2026-03-21T12:05:26",
+  "configs": {
+    "v1_baseline": {
+      "config": "v1_baseline",
+      "total_tokens": 640,
+      "total_time_s": 56.09,
+      "avg_tps": 11.41,
+      "per_request_tps": [
+        13.831,
+        18.119,
+        9.846,
+        16.034,
+        6.813
+      ],
+      "min_tps": 6.813,
+      "max_tps": 18.119,
+      "num_requests": 5,
+      "errors": 0
+    },
+    "v2_features": {
+      "config": "v2_features",
+      "total_tokens": 640,
+      "total_time_s": 43.794,
+      "avg_tps": 14.614,
+      "per_request_tps": [
+        13.805,
+        18.081,
+        9.827,
+        16.249,
+        19.575
+      ],
+      "min_tps": 9.827,
+      "max_tps": 19.575,
+      "num_requests": 5,
+      "errors": 0
+    }
+  },
+  "speedup_ratio": 1.2808
+}

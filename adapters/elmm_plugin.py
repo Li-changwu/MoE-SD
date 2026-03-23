@@ -52,6 +52,49 @@ class ELMMConfig:
     enable_prefetch: bool = True
     # Log per-step cache stats every N intercepts (0=disabled).
     log_interval: int = 0
+    # --- Temporal Locality Collection ---
+    # Enable structured locality data collection (overlap, reuse distance).
+    enable_locality_collection: bool = True
+    # Export locality data to this directory (empty = disabled).
+    locality_export_dir: str = ""
+    # Export every N verify rounds (0 = only on shutdown).
+    locality_export_interval: int = 0
+    # --- Adaptive Cache Budget ---
+    # Enable adaptive per-layer cache budget rebalancing.
+    enable_adaptive_budget: bool = True
+    # Rebalance every N intercepts (per-layer). Higher = less overhead.
+    rebalance_interval: int = 5000
+    # Minimum fraction of total slots any layer can hold (prevents starvation).
+    min_slot_fraction: float = 0.02
+    # EMA alpha for smoothing per-layer hit rates.
+    hit_rate_ema_alpha: float = 0.05
+    # --- Pool-Direct Mode ---
+    # Skip scratchpad copies for cache hits by pointing kernel directly
+    # at the per-layer cache pool with remapped topk_ids.
+    enable_pool_direct: bool = True
+    # --- Direct Triton Dispatch ---
+    # Bypass quant_method.apply() call chain and invoke Triton kernels
+    # directly, eliminating ~8 levels of Python indirection per layer.
+    # Only active when pool-direct is also enabled and batch is small.
+    enable_direct_dispatch: bool = True
+    # --- GPU-Side Cache Lookup ---
+    # Keep cache mapping on GPU tensors to avoid GPU→CPU sync in the
+    # hot path. Falls back to CPU-side eviction only on cache miss.
+    enable_gpu_cache: bool = False  # E1 experiment: -18.5% regression, disabled
+    # --- Stale-Remap Fast Path ---
+    # After warmup, reuse per-layer remap tables and skip Phase 3
+    # (unique + tolist + dict lookup + scatter) for N-1 out of N steps.
+    # On every Nth step, do full validation. Trades ~0.1% correctness
+    # for ~8ms/step savings (eliminates GPU→CPU sync on 93% of calls).
+    stale_remap_interval: int = 0  # 0 = disabled, N > 0 = validate every N steps
+    stale_remap_warmup: int = 32   # full Phase 3 for first N calls per layer (reduced: cache stabilises in ~2 steps)
+    stale_remap_max_interval: int = 128  # adaptive: max interval before forced validation
+    # --- Phase Profiling ---
+    # Record CUDA event timing for each forward phase. Prints summary
+    # after profile_warmup + profile_steps intercepts, then disables.
+    enable_phase_profiling: bool = False
+    profile_warmup: int = 200      # skip initial intercepts
+    profile_steps: int = 100       # measure this many intercepts
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +177,47 @@ class _LayerExpertCache:
         self._slot_map[expert_id] = slot
         return slot
 
+    def resize(self, new_max_slots: int) -> int:
+        """
+        Resize cache logical capacity. Returns actual new capacity.
+
+        Uses logical-only resize: adjusts the capacity limit without
+        reallocating GPU tensors (the physical pool stays the same size).
+        If shrinking, evicts LRU entries that exceed the new limit.
+        If growing beyond physical pool, caps at physical pool size.
+        """
+        if new_max_slots == self._max_slots:
+            return self._max_slots
+        if new_max_slots < 1:
+            new_max_slots = 1
+
+        # Cap at physical pool size (no tensor reallocation)
+        physical_max = self._w13_pool.shape[0]
+        new_max_slots = min(new_max_slots, physical_max)
+
+        if new_max_slots < self._max_slots:
+            # Shrink: evict LRU entries that exceed the new limit
+            while len(self._slot_map) > new_max_slots:
+                _eid, freed_slot = self._slot_map.popitem(last=False)
+                self._free_slots.append(freed_slot)
+                self._evictions += 1
+            # Remove free slots that are beyond the new limit
+            self._free_slots = [s for s in self._free_slots if s < new_max_slots]
+
+        elif new_max_slots > self._max_slots:
+            # Grow: add newly available slots from existing physical pool
+            for s in range(self._max_slots, new_max_slots):
+                if s not in self._slot_map.values():
+                    self._free_slots.append(s)
+
+        self._max_slots = new_max_slots
+        return self._max_slots
+
+    def reset_hit_counters(self):
+        """Reset hit/miss counters (keep cached data)."""
+        self._hits = 0
+        self._misses = 0
+
 
 # ---------------------------------------------------------------------------
 # ELMMManager — core implementation
@@ -181,6 +265,53 @@ class ELMMManager:
         self._last_expert_set: dict[str, set[int]] = {}
         # Temporal locality metrics: layer_name → list of overlap ratios
         self._overlap_history: dict[str, list[float]] = {}
+        # --- Temporal Locality Collection ---
+        self._locality_analyzer: Optional[Any] = None
+        if self.config.enable_locality_collection:
+            from collectors.expert_locality_analyzer import ExpertTemporalLocalityAnalyzer
+            self._locality_analyzer = ExpertTemporalLocalityAnalyzer()
+        self._verify_round_counter = 0
+        self._current_round_experts: dict[str, set[int]] = {}
+        # --- Adaptive Cache Budget ---
+        self._hit_rate_ema: dict[str, float] = {}  # layer_name → smoothed hit rate
+        self._rebalance_step = 0
+        self._total_cache_slots = 0  # filled during install()
+        # --- Draft-Guided Prefetch ---
+        self._prefetch_hits = 0
+        self._prefetch_total = 0
+        self._pending_prefetch: dict[str, set[int]] = {}  # layer_name → set of prefetched eids
+        # --- Pool-Direct Mode ---
+        self._remap_table: Optional[torch.Tensor] = None  # [num_experts] int64 on GPU
+        # --- Direct Dispatch ---
+        self._dd_inter_w1: Optional[torch.Tensor] = None
+        self._dd_inter_act: Optional[torch.Tensor] = None
+        self._dd_inter_w2: Optional[torch.Tensor] = None
+        self._dd_tile_config: Optional[dict] = None
+        self._dd_top_k: int = 0
+        self._dd_activation_name: str = "silu"
+        self._dd_silu_and_mul = None  # vLLM's optimized activation
+        self._dd_invoke_kernel = None  # cached function ref
+        self._dd_align_fn = None       # cached function ref
+        self._dd_max_M: int = 64       # max decode tokens
+        # --- GPU-Side Cache Lookup ---
+        # Per-layer GPU tensors: expert_id → slot_id (-1 = not cached)
+        self._gpu_eid_to_slot: dict[str, torch.Tensor] = {}
+        # Per-layer GPU LRU clock (monotonic counter per slot)
+        self._gpu_lru_clock: dict[str, torch.Tensor] = {}
+        self._gpu_cache_step: int = 0  # global monotonic clock
+        # --- Stale-Remap Fast Path (TASER: Temporal-Adaptive Stale Expert Routing) ---
+        # Per-layer persistent remap tables (GPU, shape [num_experts])
+        self._layer_remap: dict[str, torch.Tensor] = {}
+        # Per-layer call counters
+        self._layer_remap_step: dict[str, int] = {}
+        # Per-layer adaptive validation interval (grows when routing stable, shrinks when volatile)
+        self._layer_adaptive_interval: dict[str, int] = {}
+        # Per-layer next validation step number
+        self._layer_next_validation: dict[str, int] = {}
+        # --- Phase Profiling ---
+        self._prof_events: list = []   # list of (phase_name, start_event, end_event)
+        self._prof_phase_ms: dict = {}  # phase → accumulated ms
+        self._prof_count: int = 0
 
     # -----------------------------------------------------------------------
     # Installation
@@ -327,6 +458,51 @@ class ELMMManager:
         first_meta = list(self._layer_meta.values())[0]
         experts_per_layer = per_layer_budget // first_meta["expert_size"]
         self._installed = True
+        self._total_cache_slots = sum(c._max_slots for c in self._layer_caches.values())
+        # Initialize adaptive budget EMA for each layer
+        for name in self._layer_caches:
+            self._hit_rate_ema[name] = 0.5  # neutral start
+        # Initialize remap table for pool-direct mode
+        if self.config.enable_pool_direct:
+            max_experts = max(m["num_experts"] for m in self._layer_meta.values())
+            self._remap_table = torch.arange(
+                max_experts, dtype=torch.long, device=device
+            )
+        # Initialize GPU-side cache lookup tensors
+        if self.config.enable_gpu_cache and self.config.enable_pool_direct:
+            max_experts = max(m["num_experts"] for m in self._layer_meta.values())
+            for name, cache in self._layer_caches.items():
+                # expert_id → slot_id mapping (-1 = not cached)
+                eid_to_slot = torch.full(
+                    (max_experts,), -1, dtype=torch.long, device=device
+                )
+                # LRU timestamp per slot (0 = never used / evictable)
+                lru_clock = torch.zeros(
+                    cache._max_slots, dtype=torch.long, device=device
+                )
+                self._gpu_eid_to_slot[name] = eid_to_slot
+                self._gpu_lru_clock[name] = lru_clock
+            print(f"[ELMM] GPU-side cache lookup enabled ({max_experts} experts, "
+                  f"{len(self._layer_caches)} layers)",
+                  file=sys.stderr, flush=True)
+        # Initialize direct Triton dispatch
+        if self.config.enable_direct_dispatch and self.config.enable_pool_direct:
+            self._setup_direct_dispatch(offloaded_layers, ref_dtype, device)
+        # Initialize per-layer persistent remap tables for stale-remap mode
+        if self.config.stale_remap_interval > 0 and self.config.enable_pool_direct:
+            max_experts = max(m["num_experts"] for m in self._layer_meta.values())
+            for name in self._layer_caches:
+                # Initialize to all-zeros (safe default: slot 0 is always valid)
+                self._layer_remap[name] = torch.zeros(
+                    max_experts, dtype=torch.long, device=device
+                )
+                self._layer_remap_step[name] = 0
+                self._layer_adaptive_interval[name] = self.config.stale_remap_interval
+                self._layer_next_validation[name] = self.config.stale_remap_warmup
+            print(f"[ELMM] TASER enabled: interval={self.config.stale_remap_interval}, "
+                  f"max_interval={self.config.stale_remap_max_interval}, "
+                  f"warmup={self.config.stale_remap_warmup}",
+                  file=sys.stderr, flush=True)
         msg = (
             f"ELMM installed: {num_layers} offloaded layers, "
             f"scratchpad={scratch_mb:.0f} MB, "
@@ -335,6 +511,228 @@ class ELMMManager:
         )
         print(f"[ELMM] {msg}", file=sys.stderr, flush=True)
         logger.info(msg)
+
+    # -----------------------------------------------------------------------
+    # Direct Triton Dispatch setup
+    # -----------------------------------------------------------------------
+
+    def _setup_direct_dispatch(self, offloaded_layers, dtype, device):
+        """
+        Pre-allocate intermediate buffers and cache kernel functions
+        for bypassing quant_method.apply() on Pool-Direct offloaded layers.
+
+        Benefits:
+          - Eliminates ~8 levels of Python function call overhead per layer
+          - Pre-allocated intermediates avoid per-call buffer creation
+          - Passes pool_num_slots (17) instead of 128 to moe_align_block_size,
+            reducing internal sort work
+          - Opens the door for future INT8 pool quantization
+        """
+        import sys
+        try:
+            from vllm.model_executor.layers.fused_moe.fused_moe import (
+                invoke_fused_moe_triton_kernel,
+                try_get_optimal_moe_config,
+            )
+            from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
+                moe_align_block_size,
+            )
+        except ImportError as e:
+            print(f"[ELMM] Direct dispatch unavailable: {e}",
+                  file=sys.stderr, flush=True)
+            self.config.enable_direct_dispatch = False
+            return
+
+        self._dd_invoke_kernel = invoke_fused_moe_triton_kernel
+        self._dd_align_fn = moe_align_block_size
+
+        # Get model topology from first offloaded layer
+        first_module = offloaded_layers[0][1]
+        first_meta = list(self._layer_meta.values())[0]
+
+        self._dd_top_k = getattr(first_module, 'top_k', 8)
+        self._dd_activation_name = getattr(first_module, 'activation', 'silu')
+
+        w13_shape = first_meta["w13_shape"]  # (E, 2N, K)
+        w2_shape = first_meta["w2_shape"]    # (E, K_out, N_in)
+
+        N_w1 = w13_shape[1]      # 2*intermediate = 1536
+        K_hidden = w13_shape[2]  # hidden_dim = 2048
+        # Activation halves the gate+up dim
+        act_dim = N_w1 // 2      # intermediate = 768
+
+        max_M = self._dd_max_M   # 64
+        top_k = self._dd_top_k
+        EM = max_M * top_k       # 512
+
+        # Pre-allocate shared intermediate buffers
+        self._dd_inter_w1 = torch.empty(
+            [max_M, top_k, N_w1], dtype=dtype, device=device
+        )
+        self._dd_inter_act = torch.empty(
+            [EM, act_dim], dtype=dtype, device=device
+        )
+        self._dd_inter_w2 = torch.empty(
+            [max_M, top_k, K_hidden], dtype=dtype, device=device
+        )
+
+        dd_bytes = sum(
+            t.nelement() * t.element_size()
+            for t in [self._dd_inter_w1, self._dd_inter_act, self._dd_inter_w2]
+        )
+
+        # Cache tile config (shape-based, num_experts dim is ignored).
+        # Use M=4 (typical decode batch: K+1 tokens with K=3) instead of
+        # max_M=64 so the config is tuned for the decode hot path.
+        max_slots = max(c._max_slots for c in self._layer_caches.values())
+        w1_size = torch.Size([max_slots, N_w1, K_hidden])
+        w2_size = torch.Size([max_slots, K_hidden, act_dim])
+        typical_decode_M = 4
+        try:
+            self._dd_tile_config = try_get_optimal_moe_config(
+                w1_size, w2_size, top_k,
+                "bf16" if dtype == torch.bfloat16 else "fp16",
+                typical_decode_M,
+                block_shape=None,
+            )
+        except Exception:
+            # Fallback default config
+            self._dd_tile_config = {
+                "BLOCK_SIZE_M": 64,
+                "BLOCK_SIZE_N": 64,
+                "BLOCK_SIZE_K": 32,
+                "GROUP_SIZE_M": 8,
+                "num_warps": 4,
+                "num_stages": 3,
+            }
+
+        # Import optimized activation
+        try:
+            from vllm._custom_ops import silu_and_mul
+            self._dd_silu_and_mul = silu_and_mul
+        except ImportError:
+            self._dd_silu_and_mul = None
+
+        print(
+            f"[ELMM] Direct dispatch enabled: "
+            f"intermediates={dd_bytes / 1024**2:.1f} MB, "
+            f"top_k={top_k}, activation={self._dd_activation_name}, "
+            f"pool_slots={max_slots}, "
+            f"tile_config=M{self._dd_tile_config.get('BLOCK_SIZE_M')}"
+            f"/N{self._dd_tile_config.get('BLOCK_SIZE_N')}"
+            f"/K{self._dd_tile_config.get('BLOCK_SIZE_K')}",
+            file=sys.stderr, flush=True,
+        )
+
+    # -----------------------------------------------------------------------
+    # GPU-Side Cache Lookup (E1 optimization)
+    # -----------------------------------------------------------------------
+
+    def _gpu_cache_phase3(
+        self,
+        layer_name: str,
+        topk_ids: torch.Tensor,
+        cache: '_LayerExpertCache',
+        meta: dict,
+        module: nn.Module,
+    ) -> tuple[torch.Tensor, int, int] | None:
+        """
+        GPU-side Phase 3: cache lookup + miss handling + remap.
+
+        Returns (remapped_ids, step_hits, step_misses), or None if
+        fallback to CPU path is needed (e.g., too many misses for pool).
+
+        The common case (0 misses, >99% of calls) runs entirely on GPU
+        without any GPU→CPU synchronization. Only when misses occur do
+        we sync to perform CPU-side LRU eviction.
+        """
+        self._gpu_cache_step += 1
+        gpu_e2s = self._gpu_eid_to_slot[layer_name]
+        gpu_lru = self._gpu_lru_clock[layer_name]
+        remap = self._remap_table
+
+        # 1. Unique experts — stays on GPU
+        unique_eids = topk_ids.reshape(-1).unique()
+        num_unique = unique_eids.shape[0]
+
+        # 2. Lookup slots on GPU (no sync)
+        slots = gpu_e2s[unique_eids]  # [num_unique], -1 = miss
+
+        # 3. Count misses — single scalar sync
+        miss_mask = (slots == -1)
+        num_misses = miss_mask.sum().item()  # one sync point (scalar)
+
+        step_hits = num_unique - num_misses
+        step_misses = num_misses
+
+        # 4. Handle misses (rare path: <1% of calls after warmup)
+        if num_misses > 0:
+            # If more misses than pool can hold, fall back to CPU path
+            # (this only happens during cold start)
+            if num_misses > cache._max_slots:
+                return None
+
+            miss_eids_gpu = unique_eids[miss_mask]
+            miss_eids_list = miss_eids_gpu.tolist()
+
+            w13_ref = module.w13_weight
+            w2_ref = module.w2_weight
+
+            new_slots = []
+            evicted_eids = []
+            for eid in miss_eids_list:
+                # Track evictions to clear GPU mapping
+                if not cache._free_slots and cache._slot_map:
+                    evict_eid = next(iter(cache._slot_map))
+                    evicted_eids.append(evict_eid)
+                new_slot = cache.alloc_slot(eid)
+                pool_w13, pool_w2 = cache.get_slot_tensors(new_slot)
+                pool_w13.copy_(w13_ref[eid], non_blocking=True)
+                pool_w2.copy_(w2_ref[eid], non_blocking=True)
+                new_slots.append(new_slot)
+
+            # Clear GPU mapping for evicted experts
+            if evicted_eids:
+                evict_t = torch.tensor(
+                    evicted_eids, dtype=torch.long, device=gpu_e2s.device
+                )
+                gpu_e2s.scatter_(
+                    0, evict_t,
+                    torch.full_like(evict_t, -1),
+                )
+
+            # Set GPU mapping for newly loaded experts
+            miss_slots_t = torch.tensor(
+                new_slots, dtype=torch.long, device=gpu_e2s.device
+            )
+            gpu_e2s.scatter_(0, miss_eids_gpu, miss_slots_t)
+
+            # Re-read all slots (some may have changed due to eviction)
+            slots = gpu_e2s[unique_eids]
+
+            # Safety: if any slots still -1 (eviction collision), fall back
+            if (slots == -1).any().item():
+                return None
+
+        # 5. Update LRU timestamps on GPU (all unique experts touched)
+        touched_slots = slots
+        if touched_slots.numel() > 0:
+            gpu_lru.scatter_(
+                0, touched_slots,
+                torch.full_like(touched_slots, self._gpu_cache_step),
+            )
+
+        # 6. Build remap table on GPU
+        remap.scatter_(0, unique_eids, slots)
+        remapped_ids = remap[topk_ids]
+
+        # 7. Stats
+        pcie_bytes = step_misses * meta["expert_size"]
+        self._total_cache_hits += step_hits
+        self._total_cache_misses += step_misses
+        self._total_pcie_bytes += pcie_bytes
+
+        return remapped_ids, step_hits, step_misses
 
     # -----------------------------------------------------------------------
     # Core: ELMM forward_impl (scratchpad + swap)
@@ -366,6 +764,7 @@ class ELMMManager:
         self._total_intercepts += 1
 
         # --- Phase 1: Pre-routing setup (mirrors original forward_impl) ---
+        p_tok = self._maybe_profile_start("P1_setup")
         module.ensure_moe_quant_config_init()
         module.ensure_dp_chunking_init()
 
@@ -390,83 +789,227 @@ class ELMMManager:
             shared_output = module.shared_experts(shared_input)
 
         # --- Phase 2: Routing ---
+        self._maybe_profile_end(p_tok)
+        p_tok = self._maybe_profile_start("P2_routing")
         topk_weights, topk_ids = module.router.select_experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
         )
 
         # --- Phase 3: Cache lookup + scratchpad fill ---
-        unique_experts = topk_ids.reshape(-1).unique()
-        unique_list = unique_experts.tolist()
-        unique_set = set(unique_list)
+        self._maybe_profile_end(p_tok)
+        p_tok = self._maybe_profile_start("P3_cache")
 
-        # Track temporal locality
-        prev_set = self._last_expert_set.get(layer_name)
-        if prev_set is not None and len(prev_set) > 0:
-            overlap = len(prev_set & unique_set) / len(prev_set | unique_set)
-            if layer_name not in self._overlap_history:
-                self._overlap_history[layer_name] = []
-            self._overlap_history[layer_name].append(overlap)
-        self._last_expert_set[layer_name] = unique_set
-
-        step_hits = 0
-        step_misses = 0
-        pcie_bytes = 0
-
-        # Scratchpad views (same shape as this layer's weights)
-        scratch_w13 = self._scratch_w13[:meta["w13_shape"][0]]
-        scratch_w2 = self._scratch_w2[:meta["w2_shape"][0]]
-
-        # Weight references (UVA views for offloaded layers)
-        w13_ref = module.w13_weight
-        w2_ref = module.w2_weight
-
-        for eid in unique_list:
-            slot = cache.get(eid)
-            if slot is not None:
-                # Cache HIT: copy from pre-alloc pool → scratchpad (HBM→HBM fast)
-                pool_w13, pool_w2 = cache.get_slot_tensors(slot)
-                scratch_w13[eid].copy_(pool_w13, non_blocking=True)
-                scratch_w2[eid].copy_(pool_w2, non_blocking=True)
-                step_hits += 1
-            else:
-                # Cache MISS: UVA (PCIe ~25 GB/s) → scratchpad
-                scratch_w13[eid].copy_(w13_ref[eid], non_blocking=True)
-                scratch_w2[eid].copy_(w2_ref[eid], non_blocking=True)
-                pcie_bytes += meta["expert_size"]
-                step_misses += 1
-                # Allocate a cache slot and copy scratchpad → pool
-                new_slot = cache.alloc_slot(eid)
-                pool_w13, pool_w2 = cache.get_slot_tensors(new_slot)
-                pool_w13.copy_(scratch_w13[eid], non_blocking=True)
-                pool_w2.copy_(scratch_w2[eid], non_blocking=True)
-
-        # No explicit sync needed — all copies and kernel run on the same CUDA
-        # stream, so operations execute in FIFO order.
-
-        self._total_cache_hits += step_hits
-        self._total_cache_misses += step_misses
-        self._total_pcie_bytes += pcie_bytes
-
-        # --- Phase 4: Swap param.data → scratchpad, run kernel, restore ---
-        orig_w13_data = module.w13_weight.data
-        orig_w2_data = module.w2_weight.data
-
-        module.w13_weight.data = scratch_w13
-        module.w2_weight.data = scratch_w2
-
-        final_hidden = module.quant_method.apply(
-            layer=module,
-            x=hidden_states,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
+        use_pool_direct = (
+            self.config.enable_pool_direct and self._remap_table is not None
         )
 
-        # Restore UVA data immediately
-        module.w13_weight.data = orig_w13_data
-        module.w2_weight.data = orig_w2_data
+        # === TASER: Temporal-Adaptive Stale Expert Routing Fast Path ===
+        # After warmup, reuse per-layer remap and skip all Phase 3 work.
+        # Adaptive interval grows when routing is stable (2× per unchanged
+        # validation), shrinks when routing changes (reset to initial).
+        # Inspired by adaptive branch prediction (MICRO'91) and
+        # activation-aware prefetching (MoE-Infinity, OSDI'24).
+        stale_remap_ok = False
+        sri = self.config.stale_remap_interval
+        if sri > 0 and use_pool_direct and layer_name in self._layer_remap:
+            step = self._layer_remap_step[layer_name]
+            next_val = self._layer_next_validation.get(layer_name, 0)
+            if step >= self.config.stale_remap_warmup and step != next_val:
+                # FAST PATH: no unique, no tolist, no dict lookup, no sync!
+                remapped_ids = self._layer_remap[layer_name][topk_ids]
+                step_hits = 0  # stats unavailable in fast path
+                step_misses = 0
+                stale_remap_ok = True
+            self._layer_remap_step[layer_name] = step + 1
+
+        if not stale_remap_ok:
+            # Need full Phase 3 (either stale-remap disabled, warmup, or validation step)
+            use_gpu_cache = (
+                self.config.enable_gpu_cache
+                and use_pool_direct
+                and layer_name in self._gpu_eid_to_slot
+            )
+
+            if use_gpu_cache:
+                # === GPU-Side Cache Path (E1 optimization) ===
+                # Common case (0 misses) runs without GPU→CPU sync.
+                gpu_result = self._gpu_cache_phase3(
+                    layer_name, topk_ids, cache, meta, module,
+                )
+                if gpu_result is not None:
+                    remapped_ids, step_hits, step_misses = gpu_result
+                else:
+                    # Fallback: too many misses for pool, use CPU path
+                    use_gpu_cache = False
+
+            if not use_gpu_cache:
+                # === Original CPU-Side Cache Path ===
+                unique_experts = topk_ids.reshape(-1).unique()
+                unique_list = unique_experts.tolist()
+                unique_set = set(unique_list)
+
+                # Track temporal locality (lightweight: only keep last 100 samples)
+                prev_set = self._last_expert_set.get(layer_name)
+                if prev_set is not None and len(prev_set) > 0:
+                    overlap = len(prev_set & unique_set) / len(prev_set | unique_set)
+                    hist = self._overlap_history.get(layer_name)
+                    if hist is None:
+                        hist = []
+                        self._overlap_history[layer_name] = hist
+                    hist.append(overlap)
+                    if len(hist) > 100:
+                        hist.pop(0)
+                self._last_expert_set[layer_name] = unique_set
+
+                # Collect for structured locality analyzer
+                if self._locality_analyzer is not None:
+                    self._current_round_experts[layer_name] = unique_set
+
+                # Track prefetch accuracy
+                pending = self._pending_prefetch.get(layer_name)
+                if pending:
+                    prefetch_hits = len(pending & unique_set)
+                    self._prefetch_hits += prefetch_hits
+                    self._prefetch_total += len(pending)
+                    self._pending_prefetch[layer_name] = set()
+
+                # Weight references (UVA views for offloaded layers)
+                w13_ref = module.w13_weight
+                w2_ref = module.w2_weight
+
+                # Classify experts into cache hits and misses
+                hit_eids: list[int] = []
+                hit_slots: list[int] = []
+                miss_eids: list[int] = []
+
+                for eid in unique_list:
+                    slot = cache.get(eid)
+                    if slot is not None:
+                        hit_eids.append(eid)
+                        hit_slots.append(slot)
+                    else:
+                        miss_eids.append(eid)
+
+                step_hits = len(hit_eids)
+                step_misses = len(miss_eids)
+                pcie_bytes = step_misses * meta["expert_size"]
+
+                # Handle cache misses: copy UVA → pool slot
+                miss_slots: list[int] = []
+                for eid in miss_eids:
+                    new_slot = cache.alloc_slot(eid)
+                    pool_w13, pool_w2 = cache.get_slot_tensors(new_slot)
+                    pool_w13.copy_(w13_ref[eid], non_blocking=True)
+                    pool_w2.copy_(w2_ref[eid], non_blocking=True)
+                    miss_slots.append(new_slot)
+
+                if use_pool_direct:
+                    remap = self._remap_table
+                    all_eids = hit_eids + miss_eids
+                    all_slots = hit_slots + miss_slots
+                    if all_eids:
+                        eid_t = torch.tensor(
+                            all_eids, dtype=torch.long, device=remap.device
+                        )
+                        slot_t = torch.tensor(
+                            all_slots, dtype=torch.long, device=remap.device
+                        )
+                        remap.scatter_(0, eid_t, slot_t)
+                    remapped_ids = remap[topk_ids]
+                    # Persist to per-layer remap for stale-remap mode
+                    if sri > 0 and layer_name in self._layer_remap:
+                        lr = self._layer_remap[layer_name]
+                        lr.fill_(0)  # safe default (slot 0 always valid)
+                        if all_eids:
+                            lr.scatter_(0, eid_t, slot_t)
+                        # --- TASER adaptive interval update ---
+                        # Compare with previous expert set: if unchanged,
+                        # grow interval (routing stable); if changed, shrink.
+                        # Inspired by adaptive branch prediction (MICRO'91).
+                        cur_interval = self._layer_adaptive_interval.get(layer_name, sri)
+                        max_interval = self.config.stale_remap_max_interval
+                        if prev_set is not None and prev_set == unique_set:
+                            # Routing stable → grow interval (exponential backoff)
+                            new_interval = min(cur_interval * 2, max_interval)
+                        else:
+                            # Routing changed → reset to initial interval
+                            new_interval = sri
+                        self._layer_adaptive_interval[layer_name] = new_interval
+                        self._layer_next_validation[layer_name] = step + 1 + new_interval
+                else:
+                    # Standard Scratchpad Mode (fallback)
+                    scratch_w13 = self._scratch_w13[:meta["w13_shape"][0]]
+                    scratch_w2 = self._scratch_w2[:meta["w2_shape"][0]]
+                    for eid, slot in zip(hit_eids, hit_slots):
+                        pool_w13, pool_w2 = cache.get_slot_tensors(slot)
+                        scratch_w13[eid].copy_(pool_w13, non_blocking=True)
+                        scratch_w2[eid].copy_(pool_w2, non_blocking=True)
+                    for eid, slot in zip(miss_eids, miss_slots):
+                        pool_w13, pool_w2 = cache.get_slot_tensors(slot)
+                        scratch_w13[eid].copy_(pool_w13, non_blocking=True)
+                        scratch_w2[eid].copy_(pool_w2, non_blocking=True)
+
+                self._total_cache_hits += step_hits
+                self._total_cache_misses += step_misses
+                self._total_pcie_bytes += pcie_bytes
+
+        # Update adaptive budget EMA for this layer
+        if self.config.enable_adaptive_budget:
+            step_total = step_hits + step_misses
+            if step_total > 0:
+                inst_rate = step_hits / step_total
+                alpha = self.config.hit_rate_ema_alpha
+                old = self._hit_rate_ema.get(layer_name, 0.5)
+                self._hit_rate_ema[layer_name] = (1 - alpha) * old + alpha * inst_rate
+
+            self._rebalance_step += 1
+            if (self.config.rebalance_interval > 0
+                    and self._rebalance_step % self.config.rebalance_interval == 0):
+                self._rebalance_cache_budget()
+
+        # --- Phase 4: Kernel compute ---
+        self._maybe_profile_end(p_tok)
+        p_tok = self._maybe_profile_start("P4_kernel")
+        use_direct = (
+            self.config.enable_direct_dispatch
+            and use_pool_direct
+            and self._dd_invoke_kernel is not None
+            and hidden_states.shape[0] <= self._dd_max_M
+        )
+
+        if use_direct:
+            # === Direct Triton Dispatch (bypass quant_method.apply chain) ===
+            final_hidden = self._direct_dispatch_kernel(
+                hidden_states, topk_weights, remapped_ids, cache, module,
+            )
+        else:
+            # === Original path via quant_method.apply ===
+            orig_w13_data = module.w13_weight.data
+            orig_w2_data = module.w2_weight.data
+
+            if use_pool_direct:
+                module.w13_weight.data = cache._w13_pool
+                module.w2_weight.data = cache._w2_pool
+                kernel_topk_ids = remapped_ids
+            else:
+                module.w13_weight.data = scratch_w13
+                module.w2_weight.data = scratch_w2
+                kernel_topk_ids = topk_ids
+
+            final_hidden = module.quant_method.apply(
+                layer=module,
+                x=hidden_states,
+                topk_weights=topk_weights,
+                topk_ids=kernel_topk_ids,
+            )
+
+            module.w13_weight.data = orig_w13_data
+            module.w2_weight.data = orig_w2_data
 
         # --- Phase 5: Shared experts ---
+        self._maybe_profile_end(p_tok)
+        p_tok = self._maybe_profile_start("P5_shared")
         if has_separate_shared:
             if use_shared_stream:
                 from vllm.utils.torch_utils import current_stream
@@ -476,11 +1019,179 @@ class ELMMManager:
             final_hidden = (shared_output, final_hidden)
 
         # --- Optional logging ---
+        self._maybe_profile_end(p_tok)
+        self._maybe_profile_report()
         if (self.config.log_interval > 0
                 and self._total_intercepts % self.config.log_interval == 0):
             self.log_stats()
 
         return final_hidden
+
+    # -----------------------------------------------------------------------
+    # Direct Triton Dispatch (Direction D)
+    # -----------------------------------------------------------------------
+
+    def _direct_dispatch_kernel(
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        cache: _LayerExpertCache,
+        module: nn.Module,
+    ) -> torch.Tensor:
+        """
+        Directly invoke Triton FusedMoE kernels on the cache pool,
+        bypassing the quant_method.apply() → FusedMoEModularKernel →
+        TritonExperts call chain (~8 levels of Python indirection).
+
+        Flow:
+          1. moe_align_block_size(topk_ids, num_experts=pool_slots)
+          2. invoke_fused_moe_triton_kernel(hidden → W1 → intermediate)
+          3. silu_and_mul activation
+          4. invoke_fused_moe_triton_kernel(intermediate → W2 → output)
+          5. Sum over top_k dimension
+        """
+        import triton.language as tl
+
+        invoke_kernel = self._dd_invoke_kernel
+        align_fn = self._dd_align_fn
+        config = self._dd_tile_config
+
+        M = hidden_states.shape[0]
+        top_k = self._dd_top_k
+
+        w1 = cache._w13_pool   # [S, 2N, K]
+        w2 = cache._w2_pool    # [S, K_out, N_in]
+        pool_num_slots = w1.shape[0]
+
+        N_w1 = w1.shape[1]          # 2*intermediate = 1536
+        K_hidden = w1.shape[2]      # hidden_dim = 2048
+        act_dim = N_w1 // 2         # intermediate = 768
+
+        # Compute type
+        dt = hidden_states.dtype
+        if dt == torch.bfloat16:
+            compute_type = tl.bfloat16
+        elif dt == torch.float16:
+            compute_type = tl.float16
+        else:
+            compute_type = tl.float32
+
+        # 1. Align tokens by expert (using pool slot count, not 128)
+        sorted_token_ids, expert_ids, num_tokens_post_padded = align_fn(
+            topk_ids, config["BLOCK_SIZE_M"], pool_num_slots, None
+        )
+
+        # 2. Slice pre-allocated intermediate buffers
+        inter_w1 = self._dd_inter_w1[:M, :top_k, :N_w1]
+        inter_act = self._dd_inter_act[:M * top_k, :act_dim]
+        inter_w2 = self._dd_inter_w2[:M, :top_k, :K_hidden]
+
+        # 3. W1 kernel: hidden[M, K] × w1[slot, 2N, K]ᵀ → inter_w1[M, top_k, 2N]
+        invoke_kernel(
+            hidden_states, w1, inter_w1,
+            None, None,          # A_scale, B_scale
+            None,                # topk_weights (apply during W2)
+            sorted_token_ids, expert_ids, num_tokens_post_padded,
+            False,               # mul_routed_weight
+            top_k,
+            config,
+            compute_type=compute_type,
+            use_fp8_w8a8=False, use_int8_w8a8=False,
+            use_int8_w8a16=False, use_int4_w4a16=False,
+            per_channel_quant=False,
+            block_shape=None, B_bias=None,
+        )
+
+        # 4. Activation: silu(gate) * up
+        flat_w1 = inter_w1.reshape(-1, N_w1)
+        if self._dd_silu_and_mul is not None:
+            self._dd_silu_and_mul(inter_act, flat_w1)
+        else:
+            gate = flat_w1[:, :act_dim]
+            up = flat_w1[:, act_dim:]
+            inter_act.copy_(torch.nn.functional.silu(gate) * up)
+
+        # 5. W2 kernel: inter_act[M*top_k, N] × w2[slot, K, N]ᵀ → inter_w2[M, top_k, K]
+        apply_rw = not getattr(module, 'apply_router_weight_on_input', False)
+        invoke_kernel(
+            inter_act, w2, inter_w2,
+            None, None,          # A_scale, B_scale
+            topk_weights,        # for router weight multiplication
+            sorted_token_ids, expert_ids, num_tokens_post_padded,
+            apply_rw,            # mul_routed_weight
+            1,                   # top_k=1 for W2 (input is flat M*top_k)
+            config,
+            compute_type=compute_type,
+            use_fp8_w8a8=False, use_int8_w8a8=False,
+            use_int8_w8a16=False, use_int4_w4a16=False,
+            per_channel_quant=False,
+            block_shape=None, B_bias=None,
+        )
+
+        # 6. Sum over top_k dimension → [M, K]
+        return inter_w2.sum(dim=1)
+
+    # -----------------------------------------------------------------------
+    # Phase Profiling
+    # -----------------------------------------------------------------------
+
+    def _maybe_profile_start(self, phase_name: str):
+        """Record a CUDA event for phase start (only in profiling mode)."""
+        if not self.config.enable_phase_profiling:
+            return None
+        n = self._total_intercepts
+        warmup = self.config.profile_warmup
+        steps = self.config.profile_steps
+        if n < warmup or n >= warmup + steps:
+            return None
+        ev = torch.cuda.Event(enable_timing=True)
+        ev.record()
+        return (phase_name, ev)
+
+    def _maybe_profile_end(self, token):
+        """Record a CUDA event for phase end and store the pair."""
+        if token is None:
+            return
+        phase_name, start_ev = token
+        end_ev = torch.cuda.Event(enable_timing=True)
+        end_ev.record()
+        self._prof_events.append((phase_name, start_ev, end_ev))
+
+    def _maybe_profile_report(self):
+        """After profiling window completes, sync and print timing report."""
+        if not self.config.enable_phase_profiling:
+            return
+        n = self._total_intercepts
+        warmup = self.config.profile_warmup
+        steps = self.config.profile_steps
+        target = warmup + steps
+        if n != target:
+            return
+        import sys
+        torch.cuda.synchronize()
+        phase_ms: dict[str, list[float]] = {}
+        for phase_name, start_ev, end_ev in self._prof_events:
+            elapsed = start_ev.elapsed_time(end_ev)
+            phase_ms.setdefault(phase_name, []).append(elapsed)
+        num_layers = len(self._layer_caches) or 1
+        num_steps = steps // num_layers  # rough step count
+        print(f"\n[ELMM] === Phase Profiling Report ({steps} intercepts, "
+              f"~{num_steps} decode steps) ===", file=sys.stderr, flush=True)
+        total_ms = 0.0
+        for phase, times in sorted(phase_ms.items()):
+            avg = sum(times) / len(times)
+            total = sum(times)
+            total_ms += total
+            print(f"  {phase:20s}: avg={avg:.3f} ms × {len(times)} = "
+                  f"{total:.1f} ms total ({total / max(num_steps, 1):.2f} ms/step)",
+                  file=sys.stderr, flush=True)
+        print(f"  {'TOTAL':20s}: {total_ms:.1f} ms "
+              f"({total_ms / max(num_steps, 1):.2f} ms/step)",
+              file=sys.stderr, flush=True)
+        print("[ELMM] === End Profiling ===\n", file=sys.stderr, flush=True)
+        self._prof_events.clear()
+        self.config.enable_phase_profiling = False  # auto-disable
 
     # -----------------------------------------------------------------------
     # Prefetch API (called from draft phase)
@@ -505,7 +1216,10 @@ class ELMMManager:
         module = self._patched_modules.get(layer_name)
         if module is None:
             return
-        device = torch.device("cuda")
+
+        # Track what we prefetched for accuracy measurement
+        if layer_name not in self._pending_prefetch:
+            self._pending_prefetch[layer_name] = set()
 
         with torch.cuda.stream(stream):
             for eid in expert_ids:
@@ -516,12 +1230,214 @@ class ELMMManager:
                 pool_w13, pool_w2 = cache.get_slot_tensors(slot)
                 pool_w13.copy_(module.w13_weight[eid], non_blocking=True)
                 pool_w2.copy_(module.w2_weight[eid], non_blocking=True)
-                cache.put(eid, w13_gpu, w2_gpu)
+                self._pending_prefetch[layer_name].add(eid)
+
+    def prefetch_for_draft_routing(
+        self,
+        draft_routing: dict[int, list[int]],
+    ):
+        """
+        Prefetch experts predicted by draft model routing decisions.
+
+        Called by the draft-phase hook after each draft token is generated.
+        Maps layer indices to layer names and triggers async prefetch.
+
+        Args:
+            draft_routing: {layer_index: [expert_ids]} from draft model routing
+        """
+        if not self.config.enable_prefetch or not self._installed:
+            return
+        # Build layer_index → layer_name mapping (cached)
+        if not hasattr(self, "_layer_idx_to_name"):
+            self._layer_idx_to_name: dict[int, str] = {}
+            for name in self._layer_caches:
+                # Extract layer index from name like "model.layers.5.mlp.experts"
+                parts = name.split(".")
+                for i, p in enumerate(parts):
+                    if p == "layers" and i + 1 < len(parts):
+                        try:
+                            self._layer_idx_to_name[int(parts[i + 1])] = name
+                        except ValueError:
+                            pass
+        for layer_idx, expert_ids in draft_routing.items():
+            layer_name = self._layer_idx_to_name.get(layer_idx)
+            if layer_name:
+                self.prefetch_experts(layer_name, expert_ids)
 
     def sync_prefetch(self):
         """Wait for all prefetch transfers to complete."""
         if self._prefetch_stream is not None:
             self._prefetch_stream.synchronize()
+
+    # -----------------------------------------------------------------------
+    # Verify round lifecycle (for locality collection)
+    # -----------------------------------------------------------------------
+
+    def on_verify_round_end(self):
+        """
+        Signal end of a verify round. Flushes accumulated per-layer expert
+        data to the structured locality analyzer.
+        """
+        if self._locality_analyzer is not None and self._current_round_experts:
+            # Convert to analyzer format: {layer_id: [[expert_ids]]}
+            expert_indices = {}
+            for layer_name, eset in self._current_round_experts.items():
+                # Extract layer index
+                parts = layer_name.split(".")
+                layer_id = 0
+                for i, p in enumerate(parts):
+                    if p == "layers" and i + 1 < len(parts):
+                        try:
+                            layer_id = int(parts[i + 1])
+                        except ValueError:
+                            pass
+                expert_indices[layer_id] = [list(eset)]
+            self._locality_analyzer.record_verify_round(
+                round_id=self._verify_round_counter,
+                expert_indices=expert_indices,
+            )
+            self._verify_round_counter += 1
+        self._current_round_experts.clear()
+
+        # Periodic locality export
+        if (self.config.locality_export_interval > 0
+                and self.config.locality_export_dir
+                and self._verify_round_counter % self.config.locality_export_interval == 0):
+            self.export_locality_data()
+
+    # -----------------------------------------------------------------------
+    # Adaptive Cache Budget Rebalancing
+    # -----------------------------------------------------------------------
+
+    def _rebalance_cache_budget(self):
+        """
+        Redistribute cache slots across layers proportional to their
+        smoothed hit rates. Layers with higher hit rates get more slots,
+        layers with lower hit rates get fewer (subject to minimum).
+
+        This is safe because layers execute sequentially and the scratchpad
+        is shared — we only resize the per-layer LRU pool.
+        """
+        if not self._layer_caches or not self._hit_rate_ema:
+            return
+
+        total_slots = self._total_cache_slots
+        num_layers = len(self._layer_caches)
+        min_slots = max(1, int(total_slots * self.config.min_slot_fraction))
+
+        # Compute weight per layer: higher hit rate → more valuable → more slots
+        # Inverse logic: layers with LOW hit rate benefit MORE from extra slots.
+        # But empirically, layers that already have high hit rates should keep
+        # their slots. We use miss_rate as the allocation weight: layers with
+        # more misses need more cache capacity.
+        weights = {}
+        for name, ema in self._hit_rate_ema.items():
+            # miss_rate as weight — layers that miss more need more capacity
+            weights[name] = max(0.01, 1.0 - ema)
+
+        total_weight = sum(weights.values())
+        if total_weight <= 0:
+            return
+
+        # Distribute slots proportional to miss rate
+        allocatable = total_slots - min_slots * num_layers
+        if allocatable <= 0:
+            return
+
+        new_allocations = {}
+        for name in self._layer_caches:
+            w = weights.get(name, 1.0 / num_layers)
+            extra = int(allocatable * w / total_weight)
+            new_allocations[name] = min_slots + extra
+
+        # Fix rounding: distribute remainder to highest-weight layers
+        allocated = sum(new_allocations.values())
+        remainder = total_slots - allocated
+        if remainder > 0:
+            sorted_layers = sorted(weights, key=lambda n: weights[n], reverse=True)
+            for i in range(remainder):
+                new_allocations[sorted_layers[i % len(sorted_layers)]] += 1
+
+        # Apply resizes
+        resized = 0
+        for name, cache in self._layer_caches.items():
+            target = new_allocations.get(name, cache._max_slots)
+            if target != cache._max_slots:
+                cache.resize(target)
+                resized += 1
+
+        if resized > 0:
+            import sys
+            print(
+                f"[ELMM] Rebalanced cache: {resized}/{num_layers} layers resized "
+                f"(total={total_slots} slots)",
+                file=sys.stderr, flush=True,
+            )
+
+    # -----------------------------------------------------------------------
+    # Locality Data Export
+    # -----------------------------------------------------------------------
+
+    def export_locality_data(self, output_dir: str = ""):
+        """
+        Export temporal locality data to files.
+
+        Exports both the raw overlap history and the structured analyzer report.
+        """
+        import json
+        from pathlib import Path
+
+        out = Path(output_dir or self.config.locality_export_dir or "results/elmm_locality")
+        out.mkdir(parents=True, exist_ok=True)
+
+        # 1. Raw overlap history
+        raw = {}
+        for name, overlaps in self._overlap_history.items():
+            if overlaps:
+                raw[name] = {
+                    "samples": len(overlaps),
+                    "mean": sum(overlaps) / len(overlaps),
+                    "last_10_mean": (
+                        sum(overlaps[-10:]) / len(overlaps[-10:])
+                        if len(overlaps) >= 10 else sum(overlaps) / len(overlaps)
+                    ),
+                }
+        with open(out / "overlap_history.json", "w") as f:
+            json.dump(raw, f, indent=2)
+
+        # 2. Structured analyzer report
+        if self._locality_analyzer is not None:
+            report = self._locality_analyzer.generate_report()
+            with open(out / "locality_report.json", "w") as f:
+                json.dump(report, f, indent=2, default=str)
+            self._locality_analyzer.export_csv(str(out))
+
+        # 3. Per-layer cache stats
+        cache_stats = {}
+        for name, cache in self._layer_caches.items():
+            cache_stats[name] = {
+                "max_slots": cache._max_slots,
+                "cached": len(cache._slot_map),
+                "hit_rate": cache.hit_rate,
+                "hits": cache._hits,
+                "misses": cache._misses,
+                "evictions": cache._evictions,
+                "ema_hit_rate": self._hit_rate_ema.get(name, 0.0),
+            }
+        with open(out / "cache_stats.json", "w") as f:
+            json.dump(cache_stats, f, indent=2)
+
+        # 4. Prefetch accuracy
+        if self._prefetch_total > 0:
+            prefetch_stats = {
+                "prefetch_hits": self._prefetch_hits,
+                "prefetch_total": self._prefetch_total,
+                "prefetch_accuracy": self._prefetch_hits / self._prefetch_total,
+            }
+            with open(out / "prefetch_stats.json", "w") as f:
+                json.dump(prefetch_stats, f, indent=2)
+
+        logger.info(f"Locality data exported to {out}")
 
     # -----------------------------------------------------------------------
     # Statistics
@@ -531,12 +1447,13 @@ class ELMMManager:
         total_h = self._total_cache_hits
         total_m = self._total_cache_misses
         total = total_h + total_m
-        return {
+        stats = {
             "total_intercepts": self._total_intercepts,
             "total_cache_hits": total_h,
             "total_cache_misses": total_m,
             "overall_hit_rate": total_h / total if total > 0 else 0.0,
             "total_pcie_MB": self._total_pcie_bytes / 1024**2,
+            "verify_rounds": self._verify_round_counter,
             "per_layer": {
                 name: {
                     "hit_rate": c.hit_rate,
@@ -545,6 +1462,7 @@ class ELMMManager:
                     "evictions": c._evictions,
                     "cached": len(c._slot_map),
                     "max_slots": c._max_slots,
+                    "ema_hit_rate": round(self._hit_rate_ema.get(name, 0.0), 4),
                 }
                 for name, c in self._layer_caches.items()
             },
@@ -558,6 +1476,23 @@ class ELMMManager:
                 for name, h in self._overlap_history.items()
             } if self._overlap_history else {},
         }
+        # Prefetch accuracy
+        if self._prefetch_total > 0:
+            stats["prefetch"] = {
+                "hits": self._prefetch_hits,
+                "total": self._prefetch_total,
+                "accuracy": round(self._prefetch_hits / self._prefetch_total, 4),
+            }
+        # Locality analyzer summary
+        if self._locality_analyzer is not None and self._verify_round_counter > 0:
+            loc = self._locality_analyzer.compute_statistics()
+            stats["locality_summary"] = {
+                "inter_round_overlap": loc.mean_interround_overlap,
+                "mean_reuse_distance": loc.mean_reuse_distance,
+                "draft_target_correlation": loc.mean_draft_target_correlation,
+                "cache_hit_rate_estimate": loc.cache_hit_rate_estimate,
+            }
+        return stats
 
     def log_stats(self):
         s = self.get_stats()
@@ -575,6 +1510,10 @@ class ELMMManager:
         """Release all cache memory and restore original forward_impl."""
         if not self._installed:
             return
+
+        # Export locality data before cleanup
+        if self.config.locality_export_dir and self._verify_round_counter > 0:
+            self.export_locality_data()
 
         # Restore original forward_impl on each patched module
         for name, module in self._patched_modules.items():

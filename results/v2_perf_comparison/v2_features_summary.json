@@ -1,0 +1,17 @@
+{
+  "config": "v2_features",
+  "total_tokens": 640,
+  "total_time_s": 43.794,
+  "avg_tps": 14.614,
+  "per_request_tps": [
+    13.805,
+    18.081,
+    9.827,
+    16.249,
+    19.575
+  ],
+  "min_tps": 9.827,
+  "max_tps": 19.575,
+  "num_requests": 5,
+  "errors": 0
+}
