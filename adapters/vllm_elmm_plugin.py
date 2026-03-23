@@ -60,6 +60,7 @@ def register():
         stale_remap = int(os.environ.get("ELMM_STALE_REMAP", "0"))
         stale_remap_warmup = int(os.environ.get("ELMM_STALE_REMAP_WARMUP", "32"))
         stale_remap_max_interval = int(os.environ.get("ELMM_STALE_REMAP_MAX_INTERVAL", "128"))
+        int8_pool = os.environ.get("ELMM_INT8_POOL", "0") == "1"
 
         from adapters.elmm_plugin import ELMMConfig, activate_elmm
 
@@ -79,6 +80,7 @@ def register():
             stale_remap_interval=stale_remap,
             stale_remap_warmup=stale_remap_warmup,
             stale_remap_max_interval=stale_remap_max_interval,
+            enable_int8_pool=int8_pool,
         )
 
         model = self.model_runner.model

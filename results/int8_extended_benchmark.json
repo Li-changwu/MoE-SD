@@ -1,0 +1,53 @@
+{
+  "kernel_scaling": [
+    {
+      "batch_size": 1,
+      "bf16_ms": 0.2776,
+      "int8_ms": 0.2616,
+      "speedup": 1.0608
+    },
+    {
+      "batch_size": 4,
+      "bf16_ms": 0.3786,
+      "int8_ms": 0.4093,
+      "speedup": 0.925
+    },
+    {
+      "batch_size": 8,
+      "bf16_ms": 0.3001,
+      "int8_ms": 0.2612,
+      "speedup": 1.1487
+    },
+    {
+      "batch_size": 16,
+      "bf16_ms": 0.2792,
+      "int8_ms": 0.2638,
+      "speedup": 1.0584
+    },
+    {
+      "batch_size": 32,
+      "bf16_ms": 0.282,
+      "int8_ms": 0.2676,
+      "speedup": 1.0539
+    }
+  ],
+  "cpu_to_gpu_copy": {
+    "bf16": {
+      "ms": 0.3858,
+      "bytes": 9437184,
+      "bw_gb_s": 24.5
+    },
+    "int8": {
+      "ms": 0.2328,
+      "bytes": 4732928,
+      "bw_gb_s": 20.3
+    },
+    "speedup": 1.657
+  },
+  "analysis": {
+    "bf16_kernel_1tok_ms": 0.2776,
+    "int8_kernel_1tok_ms": 0.2616,
+    "bf16_copy_ms": 0.3858,
+    "int8_copy_ms": 0.2328
+  }
+}
