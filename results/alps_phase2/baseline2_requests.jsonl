@@ -1,0 +1,5 @@
+{"prompt_idx": 0, "completion_tokens": 128, "elapsed_s": 10.142, "tps": 12.621}
+{"prompt_idx": 1, "completion_tokens": 128, "elapsed_s": 8.23, "tps": 15.552}
+{"prompt_idx": 2, "completion_tokens": 128, "elapsed_s": 8.524, "tps": 15.017}
+{"prompt_idx": 3, "completion_tokens": 128, "elapsed_s": 7.835, "tps": 16.336}
+{"prompt_idx": 4, "completion_tokens": 128, "elapsed_s": 23.727, "tps": 5.395}

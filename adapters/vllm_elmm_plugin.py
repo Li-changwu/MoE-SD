@@ -62,6 +62,7 @@ def register():
         stale_remap_max_interval = int(os.environ.get("ELMM_STALE_REMAP_MAX_INTERVAL", "128"))
         enable_cuda_graph = os.environ.get("ELMM_CUDA_GRAPH", "1") == "1"
         enable_shared_parallel = os.environ.get("ELMM_SHARED_PARALLEL", "1") == "1"
+        enable_oracle_prefetch = os.environ.get("ELMM_ORACLE_PREFETCH", "1") == "1"
 
         from adapters.elmm_plugin import ELMMConfig, activate_elmm
 
@@ -83,6 +84,7 @@ def register():
             stale_remap_max_interval=stale_remap_max_interval,
             enable_cuda_graph=enable_cuda_graph,
             enable_shared_parallel=enable_shared_parallel,
+            enable_oracle_prefetch=enable_oracle_prefetch,
         )
 
         model = self.model_runner.model

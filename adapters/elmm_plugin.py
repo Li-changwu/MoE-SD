@@ -111,6 +111,13 @@ class ELMMConfig:
     # well before the HBM-bound MoE kernel (~0.35 ms), so the overlap is
     # nearly free.  Saves ~0.64 ms/step (= 0.035 × 0.7 × 26 layers).
     enable_shared_parallel: bool = True
+    # --- Oracle Cross-Layer Prefetch (ALPS Phase 2) ---
+    # During Layer N's MoE kernel (HBM-bound), prefetch experts for Layer
+    # N+1 via PCIe on a separate stream.  Uses the frozen TASER remap table
+    # to predict N+1's needed experts (deterministic in stale path).
+    # Mainly benefits warmup / prefill (cold cache); during stale path the
+    # cache is already populated so prefetch is a no-op.
+    enable_oracle_prefetch: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -409,6 +416,14 @@ class ELMMManager:
         # Diagnostic counters
         self._graph_replay_count: int = 0
         self._graph_eager_count: int = 0
+        # --- Oracle Cross-Layer Prefetch (ALPS Phase 2) ---
+        # Ordered list of offloaded layer names (populated during install())
+        self._ordered_layers: list[str] = []
+        # layer_name → index in _ordered_layers for O(1) lookup
+        self._layer_index: dict[str, int] = {}
+        # Counters for prefetch effectiveness
+        self._oracle_prefetch_issued: int = 0
+        self._oracle_prefetch_skipped: int = 0
 
     # -----------------------------------------------------------------------
     # Installation
@@ -600,6 +615,15 @@ class ELMMManager:
                   f"max_interval={self.config.stale_remap_max_interval}, "
                   f"warmup={self.config.stale_remap_warmup}",
                   file=sys.stderr, flush=True)
+        # Build ordered layer list for cross-layer oracle prefetch
+        self._ordered_layers = sorted(
+            self._layer_caches.keys(),
+            key=lambda n: int(n.split(".")[2]) if len(n.split(".")) > 2 else 0,
+        )
+        self._layer_index = {n: i for i, n in enumerate(self._ordered_layers)}
+        if self.config.enable_oracle_prefetch:
+            print(f"[ELMM] Oracle prefetch enabled ({len(self._ordered_layers)} layers)",
+                  file=sys.stderr, flush=True)
         msg = (
             f"ELMM installed: {num_layers} offloaded layers, "
             f"scratchpad={scratch_mb:.0f} MB, "
@@ -780,6 +804,98 @@ class ELMMManager:
         if num_captured == num_total:
             print(f"[ELMM] CUDA Graph captured for all {num_total} layers",
                   file=sys.stderr, flush=True)
+
+    # -----------------------------------------------------------------------
+    # Oracle Cross-Layer Prefetch (ALPS Phase 2)
+    # -----------------------------------------------------------------------
+
+    def _oracle_prefetch_next_layer(self, layer_name: str):
+        """Prefetch experts for the next offloaded layer on _prefetch_stream.
+
+        Called at the start of Phase 4 (MoE kernel) so that PCIe H2D
+        transfers overlap with the HBM-bound MoE compute.  Uses the
+        frozen TASER remap table to deterministically identify which
+        experts next-layer needs; only issues loads for cache misses.
+
+        During stale path (99%+ of decode calls) the next-layer cache
+        is already fully populated → no-op.  Benefit comes during:
+          - Warmup (first ~32 calls per layer): cache not yet complete
+          - Prefill (cold-start): cascade loading across layers
+          - Post-validation: next layer may have changed routing
+        """
+        idx = self._layer_index.get(layer_name)
+        if idx is None or idx + 1 >= len(self._ordered_layers):
+            return  # last layer or unknown
+        next_name = self._ordered_layers[idx + 1]
+        next_cache = self._layer_caches[next_name]
+        next_module = self._patched_modules.get(next_name)
+        if next_module is None:
+            return
+
+        # Check if next layer's cache is already fully occupied
+        if len(next_cache._slot_map) >= next_cache._max_slots:
+            self._oracle_prefetch_skipped += 1
+            return
+
+        # Determine which experts next_layer will need.
+        # If TASER remap is active for next_layer, the remap table is
+        # authoritative — any expert with remap[e] == 0 AND e != 0
+        # is NOT cached.  Expert 0 always maps to slot 0 (default).
+        next_remap = self._layer_remap.get(next_name)
+        if next_remap is None:
+            return
+
+        # Find experts that are routable but not yet cached.
+        # During warmup, many remap entries are 0 (unmapped).
+        # We prefetch experts that are currently in next_cache._slot_map
+        # is incomplete.
+        # Strategy: load the experts that Layer N just used (inter-layer
+        # correlation: Jaccard ~33%), prioritising those not in next cache.
+        # This is cheap — just iterate the slot_map.
+        cached_eids = set(next_cache._slot_map.keys())
+        if len(cached_eids) >= next_cache._max_slots:
+            self._oracle_prefetch_skipped += 1
+            return
+
+        # Use current layer's cached experts as prediction for next layer.
+        # Rationale: adjacent MoE layers tend to activate overlapping experts.
+        cur_cache = self._layer_caches[layer_name]
+        predicted_eids = set(cur_cache._slot_map.keys())
+
+        # Only prefetch experts NOT already in next_cache
+        to_prefetch = predicted_eids - cached_eids
+        if not to_prefetch:
+            self._oracle_prefetch_skipped += 1
+            return
+
+        # Limit to available free slots to avoid unnecessary eviction
+        free_slots = len(next_cache._free_slots)
+        if free_slots == 0:
+            self._oracle_prefetch_skipped += 1
+            return
+
+        stream = self._prefetch_stream
+        if stream is None:
+            return
+
+        w13_ref = next_module.w13_weight
+        w2_ref = next_module.w2_weight
+
+        # Launch async H2D on prefetch stream (PCIe, not HBM)
+        stream.wait_stream(torch.cuda.current_stream())
+        count = 0
+        with torch.cuda.stream(stream):
+            for eid in to_prefetch:
+                if count >= free_slots:
+                    break
+                if next_cache.contains(eid):
+                    continue
+                slot = next_cache.alloc_slot(eid)
+                pool_w13, pool_w2 = next_cache.get_slot_tensors(slot)
+                pool_w13.copy_(w13_ref[eid], non_blocking=True)
+                pool_w2.copy_(w2_ref[eid], non_blocking=True)
+                count += 1
+        self._oracle_prefetch_issued += count
 
     # -----------------------------------------------------------------------
     # GPU-Side Cache Lookup (E1 optimization)
@@ -1155,6 +1271,12 @@ class ELMMManager:
                 shared_output = module.shared_experts(shared_input)
 
         M = hidden_states.shape[0]
+
+        # --- ALPS Phase 2: Oracle cross-layer prefetch ---
+        # While this layer's MoE kernel runs (HBM-bound), prefetch
+        # experts for the next layer via PCIe on _prefetch_stream.
+        if self.config.enable_oracle_prefetch and self._ordered_layers:
+            self._oracle_prefetch_next_layer(layer_name)
 
         # --- ALPS Phase 1: CUDA Graph replay for stale path ---
         use_graph = (
@@ -1714,6 +1836,12 @@ class ELMMManager:
                 "captured_layers": len(self._layer_graphs),
                 "total_layers": len(self._layer_caches),
                 "graph_M": self._graph_M,
+            }
+        # Oracle prefetch stats
+        if self._oracle_prefetch_issued > 0 or self._oracle_prefetch_skipped > 0:
+            stats["oracle_prefetch"] = {
+                "issued": self._oracle_prefetch_issued,
+                "skipped": self._oracle_prefetch_skipped,
             }
         return stats
 
