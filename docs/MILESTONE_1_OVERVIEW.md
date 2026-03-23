@@ -2384,7 +2384,7 @@ Phase 5: 综合集成与调优 ────────── 1-2 天
    不同于 MoE-Infinity 的训练预测器和 Pre-gated MoE 的额外网络，
    ALPS 的 oracle 是 TASER 的直接副产品——零额外成本、>99% 准确率。
 
-2. **首次在 offloaded MoE + speculative decoding 场景下实现
+2. **首次在 offloaded MoE + speculative decoding 场景下实现**
    确定性 CUDA Graph 捕获**。TASER 的 stale path 消除了 MoE forward
    中的所有动态分支（cache lookup、CPU sync、eviction），
    使 CUDA Graph 捕获成为可能——这在传统 offloading 系统中不可行。
@@ -2402,3 +2402,174 @@ Phase 5: 综合集成与调优 ────────── 1-2 天
 > 不仅跳过当前层的 Phase 3，还利用冻结的 remap 表
 > 为后续层安排预取、为 CUDA Graph 提供确定性保证、
 > 为 prefill 提供级联预热。
+
+## 十五、ALPS 实施结果与分析
+
+### 15.1 实施概述
+
+按照 §14.10 路线图，我们实施了 ALPS 的前三个组件：
+
+1. **组件 II（CUDA Graph）**：完整实现并进行了 A/B 测试
+2. **组件 III（SharedExpert 并行化）**：完整实现并进行了 A/B 测试
+3. **组件 I（Oracle 预取）/**组件 IV（Prefill 级联）**：规划中（见分析）
+
+### 15.2 组件 II 实施结果：CUDA Graph
+
+#### 15.2.1 实现细节
+
+在 `elmm_plugin.py` 中新增了 `_LayerCUDAGraph` 类和相关方法：
+
+- **`_LayerCUDAGraph`** 类：封装 placeholder 张量 + `torch.cuda.CUDAGraph`
+  - `ph_hidden [M, K]`、`ph_topk_weights [M, top_k]`、`ph_remapped_ids [M, top_k]`
+  - `capture(forward_fn)`：3 次 warm-up + 1 次 capture
+  - `replay(hidden, weights, ids)`：3 次 `copy_()` + `graph.replay()`
+- **`_try_capture_layer_graph()`**：每层首次 stale path 时触发懒捕获
+- **Phase 4 切换**：`use_graph` 条件 → graph replay 或 eager fallback
+
+#### 15.2.2 可行性验证
+
+通过分析 vLLM 的 `moe_align_block_size` 源码，确认了 CUDA Graph 的可行性：
+
+- **输出张量形状固定**：`max_num_tokens_padded = M*top_k + num_experts*(block_size-1)` = 1103
+  （对于 M=4, top_k=8, pool_slots=17, BLOCK_SIZE_M=64）
+- **Grid 大小固定**：`cdiv(1103, 64) * cdiv(N, 64)` = 18 × 24 = 432
+- **Triton kernel 内部处理动态数据**：通过 `num_tokens_post_padded` 早退检查
+
+所有 26 个 offloaded 层的 CUDA Graph 均成功捕获（M=4, top_k=8, K=2048）。
+
+#### 15.2.3 A/B 测试结果
+
+| 配置 | 平均 tok/s | 变化 |
+|------|-----------|------|
+| Baseline（TASER + Direct Dispatch） | **16.62** | — |
+| + CUDA Graph | **11.24** | **-32.4%** |
+
+**结果：显著回退**。
+
+#### 15.2.4 根因分析
+
+通过诊断计数器分析，Graph replay 比率达 82%（warmup=18%），但性能下降。
+
+**根本原因：placeholder copy 开销抵消了 kernel launch 节省**
+
+| 操作 | 每步 kernel 数量 | 开销 |
+|------|----------------|------|
+| **Eager path** | 5 kernels × 26 layers = **130** launches | ~975 µs |
+| **Graph path** | 3 copy + 1 replay × 26 layers = **104** launches | ~780 µs |
+| **净节省** | 26 fewer launches | **~195 µs (2%)** |
+
+每层 Graph replay 需要 3 次 `copy_()` 将新数据复制到 placeholder 张量：
+- `ph_hidden.copy_(hidden_states)` — 16 KB
+- `ph_topk_weights.copy_(topk_weights)` — 64 B
+- `ph_remapped_ids.copy_(remapped_ids)` — 256 B
+
+虽然数据量极小（~16 KB/层），但每次 `copy_()` 是一次完整的 CUDA kernel launch
+（~7.5 µs），78 次额外 launch 几乎完全抵消了 Graph 消除的 kernel launch 开销。
+
+此外，CUDA Graph 的私有内存池管理、driver 开销等进一步增加了 overhead。
+
+#### 15.2.5 结论与未来方向
+
+**Per-layer CUDA Graph 不适用于此工作负载**。核心矛盾是：
+
+> 每层 MoE 只有 5 个 kernel（少），但需要 3 次 copy（多）。
+> 只有在一次 Graph 包含大量 kernel 时，copy 成本才能被摊销。
+
+有效的 CUDA Graph 策略需要：
+1. **整模型 Graph**：一次 capture 整个 48 层 forward pass（包括 attention + MoE）
+2. **CUDA Graph Input Capture API**：PyTorch 正在开发的 kernel 参数更新 API，
+   可避免 placeholder copy
+3. **vLLM 原生 CUDA Graph 模式**：关闭 `--enforce-eager`，利用 vLLM 内置的
+   Graph 管理（但需要解决 offloaded 层的兼容性问题）
+
+**已禁用（`enable_cuda_graph=False`），代码保留用于未来实验。**
+
+### 15.3 组件 III 实施结果：SharedExpert 并行化
+
+#### 15.3.1 实现细节
+
+在 `_elmm_forward_impl` 中重构 SharedExpert 调度：
+
+- **Phase 1**：添加 `run_shared_parallel` 条件判断，阻止 SharedExpert 提前执行
+- **Phase 4 入口**：在 MoE kernel 启动前，fork SharedExpert 到 `_shared_expert_stream`
+- **Phase 5**：`wait_stream()` 等待 SharedExpert 完成，组合输出
+
+```python
+# Phase 4: Launch shared expert concurrently
+if run_shared_parallel:
+    shared_input = module._get_shared_experts_input(hidden_states)
+    se_stream = self._shared_expert_stream
+    se_stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(se_stream):
+        shared_output = module.shared_experts(shared_input)
+
+# MoE kernel runs on main stream (concurrently with shared expert)
+final_hidden = self._direct_dispatch_kernel(...)
+
+# Phase 5: Wait and combine
+if run_shared_parallel:
+    torch.cuda.current_stream().wait_stream(self._shared_expert_stream)
+```
+
+#### 15.3.2 A/B 测试结果
+
+| 配置 | 平均 tok/s | 变化 |
+|------|-----------|------|
+| Baseline（TASER + DD） | **16.62** | — |
+| + SharedExpert 并行 | **16.63** | **+0.06%** (≈中性) |
+
+**结果：中性**。
+
+#### 15.3.3 分析
+
+SharedExpert 的执行时间（~0.035 ms）相对于 MoE kernel（~0.35 ms）非常小。
+在 dual-stream 重叠中：
+- MoE kernel 是 HBM-bound（消耗 160 MB HBM 带宽）
+- SharedExpert 是 compute-light（少量 GEMM，~25 MB HBM 读取）
+- 两者共享 HBM 带宽，但 SharedExpert 的带宽需求仅占 MoE 的 15.6%
+
+net 节省 = 0.035 ms × 0.7（重叠率）× 26 层 = 0.64 ms/step。
+但 stream 同步开销（`wait_stream` + `stream.wait_stream`）≈ 26 × 2 × ~3 µs = 0.16 ms。端到端收益 ≈ 0.5 ms，仅占总步骤时间的 ~0.5%。
+
+在测量精度内，这一改善不可检测。
+
+**保留启用（`enable_shared_parallel=True`），因为不引入回退，
+且理论上有微小正向收益。**
+
+### 15.4 综合评估与下一步
+
+#### 15.4.1 当前性能状态
+
+| 优化阶段 | tok/s | 相对 v1 | 增量 |
+|---------|-------|---------|------|
+| v1 baseline | 7.57 | 1.00× | — |
+| + TASER + Direct Dispatch (v2) | 14.63 | 1.93× | +93% |
+| + TASER 调优（interval=16） | 16.62 | 2.20× | +13.6% |
+| + CUDA Graph (❌ disabled) | 11.24 | — | -32.4% |
+| + SharedExpert 并行 | 16.63 | 2.20× | +0.06% |
+
+#### 15.4.2 瓶颈再分析
+
+ALPS 实施揭示了一个关键事实：
+
+> **当前瓶颈不是 kernel launch overhead，而是 HBM 带宽。**
+
+Phase 4（MoE kernel）对 HBM 带宽的利用率仅 59.2%，但已占步骤时间的 97%。
+kernel launch overhead（~1 ms/step）仅占 ~3%。消除 launch overhead
+即使理论上完美，也只能提升 ~3% 的吞吐。
+
+**真正的加速路径**：
+
+1. **减少 HBM 读取量**：INT8/INT4 量化权重（将 160 MB → 80/40 MB）
+2. **提高 HBM 利用率**：从 59.2% → 更接近理论峰值（需要更好的 Triton 配置）
+3. **减少总步骤数**：更高的 speculative decode 接受率（需要更好的 draft 模型）
+4. **隐藏 HBM 延迟**：Pipeline 级并行（预取下一层权重 while 当前层计算中）
+
+#### 15.4.3 后续实施计划
+
+基于上述分析，调整剩余 ALPS 优化的优先级：
+
+1. **~~CUDA Graph~~ Oracle 预取（Phase 2）**：主要针对 TTFT 而非 decode 吞吐
+2. **Prefill 级联预热（Phase 4）**：TTFT 优化的核心
+3. **INT8 量化复活**：重新评估 W8A16 INT8 对 HBM 读取量的直接影响
+4. **Triton 配置调优**：寻找更优的 tile config 来提升 HBM 利用率

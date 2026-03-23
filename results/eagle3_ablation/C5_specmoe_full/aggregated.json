@@ -1,0 +1,23 @@
+{
+  "config_id": 5,
+  "label": "C5_specmoe_full",
+  "description": "Full SpecMoE (+ cache + prefetch)",
+  "status": "ok",
+  "repetitions": 1,
+  "output_tps": 2.1202468745375302,
+  "mean_ttft_ms": 47462.49144491787,
+  "mean_e2e_s": 47.46270553195583,
+  "total_output_tokens": 4931.0,
+  "total_time_s": 2325.6725710658357,
+  "p50_ttft_ms": 53165.24153901264,
+  "p95_ttft_ms": 72696.95400504861,
+  "p50_e2e_s": 53.16546470706817,
+  "p95_e2e_s": 72.69717791094445,
+  "acceptance_length": 1.2087336244541484,
+  "acceptance_rate": 0.4029112081513828,
+  "spec_decode_metrics": {
+    "drafts": 2290.0,
+    "draft_tokens": 6870.0,
+    "accepted_tokens": 2768.0
+  }
+}

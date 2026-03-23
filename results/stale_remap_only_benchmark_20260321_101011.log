@@ -1,0 +1,50 @@
+============================================================
+  ELMM v1 vs v2 Performance A/B Benchmark
+============================================================
+  Model:     /root/models/Qwen3-30B-A3B-Instruct-2507
+  Requests:  5 × 128 max tokens
+  Warmup:    2 requests
+  Results:   /root/MoE-SD/results/v2_perf_comparison/
+
+============================================================
+  Baseline (no stale-remap)
+============================================================
+  Server PID: 36780, log: /root/MoE-SD/results/v2_perf_comparison/server_v1_baseline.log
+  Still waiting... (30s)
+  Server ready! (54s)
+  Warming up (2 requests)...
+    [1/5] 128 tok, 9.91s, 12.92 tok/s
+    [2/5] 128 tok, 17.52s, 7.31 tok/s
+    [3/5] 128 tok, 15.74s, 8.13 tok/s
+    [4/5] 128 tok, 10.89s, 11.75 tok/s
+    [5/5] 128 tok, 7.90s, 16.20 tok/s
+  => avg 10.33 tok/s (640 tokens in 62.0s)
+
+============================================================
+  Stale-remap only (interval=16, warmup=200)
+============================================================
+  Server PID: 37773, log: /root/MoE-SD/results/v2_perf_comparison/server_v2_features.log
+  Still waiting... (30s)
+  Server ready! (57s)
+  Warming up (2 requests)...
+    [1/5] 128 tok, 9.94s, 12.88 tok/s
+    [2/5] 128 tok, 17.55s, 7.29 tok/s
+    [3/5] 128 tok, 15.77s, 8.12 tok/s
+    [4/5] 128 tok, 9.70s, 13.20 tok/s
+    [5/5] 128 tok, 6.20s, 20.64 tok/s
+  => avg 10.82 tok/s (640 tokens in 59.2s)
+
+============================================================
+  Performance Comparison
+============================================================
+
+Config                                      avg tok/s    min    max  reqs
+-------------------------------------------------------------------------
+Baseline (no stale-remap)                       10.33   7.31  16.20     5
+Stale-remap only (interval=16, warmup=200)      10.82   7.29  20.64     5
+
+  v2/v1 = 1.047x (+4.7%)
+  => v2 is FASTER by 4.7%
+
+  Full comparison saved to: /root/MoE-SD/results/v2_perf_comparison/comparison.json
+============================================================

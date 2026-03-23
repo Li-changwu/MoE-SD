@@ -1,0 +1,37 @@
+Traceback (most recent call last):
+  File "/root/MoE-SD/scripts/run_full_experiment.py", line 703, in <module>
+    pct = (out_t - baseline_tput) / baseline_tput * 100
+  File "/root/MoE-SD/scripts/run_full_experiment.py", line 667, in main
+    return results
+  File "/root/MoE-SD/scripts/run_full_experiment.py", line 172, in run_serve_experiment
+    bench_proc = subprocess.run(
+  File "/opt/miniconda3/envs/moe-sd/lib/python3.10/subprocess.py", line 505, in run
+    stdout, stderr = process.communicate(input, timeout=timeout)
+  File "/opt/miniconda3/envs/moe-sd/lib/python3.10/subprocess.py", line 1154, in communicate
+    stdout, stderr = self._communicate(input, endtime, timeout)
+  File "/opt/miniconda3/envs/moe-sd/lib/python3.10/subprocess.py", line 2022, in _communicate
+    self._check_timeout(endtime, orig_timeout, stdout, stderr)
+  File "/opt/miniconda3/envs/moe-sd/lib/python3.10/subprocess.py", line 1198, in _check_timeout
+    raise TimeoutExpired(
+subprocess.TimeoutExpired: Command '['/opt/miniconda3/envs/moe-sd/bin/vllm', 'bench', 'serve', '--base-url', 'http://127.0.0.1:8192', '--endpoint', '/v1/completions', '--endpoint-type', 'openai-comp', '--model', '/root/models/Qwen3-30B-A3B-Instruct-2507', '--dataset-name', 'random', '--num-prompts', '16', '--random-input-len', '512', '--random-output-len', '128', '--request-rate', '1.0', '--seed', '42', '--save-result', '--result-dir', '/root/MoE-SD/results/full_experiment/1_no_sd_baseline/serve']' timed out after 600 seconds
+ERROR conda.cli.main_run:execute(142): `conda run python scripts/run_full_experiment.py --configs 1 --modes serve` failed. (See above for error)
+========================================================================
+  SpecMoE Full Experiment Protocol v2
+========================================================================
+  Hardware:   RTX A6000 (48GB) + 30GB CPU offload
+  Model:      /root/models/Qwen3-30B-A3B-Instruct-2507
+  Configs:    [1]
+  Modes:      ['serve']
+  [SERVE]   16 prompts, QPS=1.0, in=512/out=128
+========================================================================
+
+========================================================================
+  [SERVE] 1_no_sd_baseline
+  Server: /opt/miniconda3/envs/moe-sd/bin/vllm serve /root/models/Qwen3-30B-A3B-Instruct-2507 --port 8192 --gpu-memory-utilization ...
+  Bench:  16 prompts, QPS=1.0, in=512/out=128
+========================================================================
+  Starting vLLM server...
+  Waiting for server on port 8192...
+    ... still waiting for server (attempt 30)
+  Server ready. Running benchmark...
+  Stopping server...

@@ -1,0 +1,23 @@
+Loaded 50 prompts from /root/MoE-SD/data/combined_sharegpt.json
+Request rate: 1.0 QPS
+Max tokens: 128
+
+============ Serving Benchmark Result ============
+Successful requests:                     50
+Benchmark duration (s):                  608.15
+Total generated tokens:                  6206
+Request throughput (req/s):              0.08
+Output token throughput (tok/s):         10.20
+---------------Time to First Token----------------
+Mean TTFT (ms):                          567753.59
+Median TTFT (ms):                        585950.10
+P99 TTFT (ms):                           598010.51
+-----Time per Output Token (excl. 1st token)------
+Mean TPOT (ms):                          0.00
+Median TPOT (ms):                        0.00
+P99 TPOT (ms):                           0.00
+---------------Inter-token Latency----------------
+Mean ITL (ms):                           0.00
+==================================================
+
+Results saved to /root/MoE-SD/results/full_experiment/1_no_sd_baseline/serve

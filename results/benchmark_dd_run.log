@@ -1,0 +1,51 @@
+nohup: ignoring input
+============================================================
+  ELMM v1 vs v2 Performance A/B Benchmark
+============================================================
+  Model:     /root/models/Qwen3-30B-A3B-Instruct-2507
+  Requests:  5 × 128 max tokens
+  Warmup:    2 requests
+  Results:   /root/MoE-SD/results/v2_perf_comparison/
+
+============================================================
+  ELMM pool-direct (direct-dispatch OFF)
+============================================================
+  Server PID: 14740, log: /root/MoE-SD/results/v2_perf_comparison/server_v1_baseline.log
+  Still waiting... (30s)
+  Server ready! (57s)
+  Warming up (2 requests)...
+    [1/5] 128 tok, 10.07s, 12.72 tok/s
+    [2/5] 128 tok, 17.70s, 7.23 tok/s
+    [3/5] 128 tok, 16.12s, 7.94 tok/s
+    [4/5] 128 tok, 24.43s, 5.24 tok/s
+    [5/5] 128 tok, 33.29s, 3.85 tok/s
+  => avg 6.30 tok/s (640 tokens in 101.6s)
+
+============================================================
+  ELMM pool-direct + direct-dispatch ON
+============================================================
+  Server PID: 16658, log: /root/MoE-SD/results/v2_perf_comparison/server_v2_features.log
+  Still waiting... (30s)
+  Server ready! (57s)
+  Warming up (2 requests)...
+    [1/5] 128 tok, 12.44s, 10.29 tok/s
+    [2/5] 128 tok, 20.23s, 6.33 tok/s
+    [3/5] 128 tok, 20.58s, 6.22 tok/s
+    [4/5] ERROR: ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))
+    [5/5] ERROR: HTTPConnectionPool(host='127.0.0.1', port=8000): Max retries exceeded with url: /v1/chat/completions (Caused by NewConnectionError("HTTPConnection(host='127.0.0.1', port=8000): Failed to establish a new connection: [Errno 111] Connection refused"))
+  => avg 7.21 tok/s (384 tokens in 53.2s)
+
+============================================================
+  Performance Comparison
+============================================================
+
+Config                                      avg tok/s    min    max  reqs
+-------------------------------------------------------------------------
+ELMM pool-direct (direct-dispatch OFF)           6.30   3.85  12.72     5
+ELMM pool-direct + direct-dispatch ON            7.21   6.22  10.29     3
+
+  v2/v1 = 1.145x (+14.5%)
+  => v2 is FASTER by 14.5%
+
+  Full comparison saved to: /root/MoE-SD/results/v2_perf_comparison/comparison.json
+============================================================

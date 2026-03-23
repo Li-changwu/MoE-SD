@@ -1,0 +1,50 @@
+============================================================
+  ELMM v1 vs v2 Performance A/B Benchmark
+============================================================
+  Model:     /root/models/Qwen3-30B-A3B-Instruct-2507
+  Requests:  5 × 128 max tokens
+  Warmup:    2 requests
+  Results:   /root/MoE-SD/results/v2_perf_comparison/
+
+============================================================
+  Pool-Direct (GPU cache OFF)
+============================================================
+  Server PID: 25993, log: /root/MoE-SD/results/v2_perf_comparison/server_v1_baseline.log
+  Still waiting... (30s)
+  Server ready! (54s)
+  Warming up (2 requests)...
+    [1/5] 128 tok, 9.95s, 12.86 tok/s
+    [2/5] 128 tok, 17.60s, 7.27 tok/s
+    [3/5] 128 tok, 15.76s, 8.12 tok/s
+    [4/5] 128 tok, 10.92s, 11.72 tok/s
+    [5/5] 128 tok, 7.91s, 16.19 tok/s
+  => avg 10.30 tok/s (640 tokens in 62.1s)
+
+============================================================
+  Pool-Direct + GPU cache ON
+============================================================
+  Server PID: 26922, log: /root/MoE-SD/results/v2_perf_comparison/server_v2_features.log
+  Still waiting... (30s)
+  Server ready! (57s)
+  Warming up (2 requests)...
+    [1/5] 128 tok, 10.91s, 11.74 tok/s
+    [2/5] 128 tok, 26.38s, 4.85 tok/s
+    [3/5] 128 tok, 8.34s, 15.35 tok/s
+    [4/5] 128 tok, 9.18s, 13.94 tok/s
+    [5/5] 128 tok, 21.46s, 5.96 tok/s
+  => avg 8.39 tok/s (640 tokens in 76.3s)
+
+============================================================
+  Performance Comparison
+============================================================
+
+Config                                      avg tok/s    min    max  reqs
+-------------------------------------------------------------------------
+Pool-Direct (GPU cache OFF)                     10.30   7.27  16.19     5
+Pool-Direct + GPU cache ON                       8.39   4.85  15.35     5
+
+  v2/v1 = 0.815x (-18.5%)
+  => v2 has 18.5% overhead
+
+  Full comparison saved to: /root/MoE-SD/results/v2_perf_comparison/comparison.json
+============================================================

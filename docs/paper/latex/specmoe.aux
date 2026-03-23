@@ -1,0 +1,226 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyperFirstAtBeginDocument{\AtBeginDocument}
+\HyperFirstAtBeginDocument{\ifx\hyper@anchor\@undefined
+\global\let\oldcontentsline\contentsline
+\gdef\contentsline#1#2#3#4{\oldcontentsline{#1}{#2}{#3}}
+\global\let\oldnewlabel\newlabel
+\gdef\newlabel#1#2{\newlabelxx{#1}#2}
+\gdef\newlabelxx#1#2#3#4#5#6{\oldnewlabel{#1}{{#2}{#3}}}
+\AtEndDocument{\ifx\hyper@anchor\@undefined
+\let\contentsline\oldcontentsline
+\let\newlabel\oldnewlabel
+\fi}
+\fi}
+\global\let\hyper@last\relax 
+\gdef\HyperFirstAtBeginDocument#1{#1}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\citation{chen2024cascade}
+\citation{yi2025moespec}
+\citation{park2025moespac}
+\@writefile{toc}{\contentsline {section}{\numberline {1}Introduction}{1}{section.1}\protected@file@percent }
+\newlabel{sec:intro}{{1}{1}{Introduction}{section.1}{}}
+\newlabel{eq:speedup}{{1}{1}{Introduction}{equation.1.1}{}}
+\citation{li2025eagle3}
+\@writefile{toc}{\contentsline {paragraph}{Contributions.}{2}{section*.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {2}Background \& Motivation}{2}{section.2}\protected@file@percent }
+\newlabel{sec:background}{{2}{2}{Background \& Motivation}{section.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.1}Mixture-of-Experts Architecture}{2}{subsection.2.1}\protected@file@percent }
+\newlabel{sec:moe}{{2.1}{2}{Mixture-of-Experts Architecture}{subsection.2.1}{}}
+\newlabel{eq:moe}{{2}{2}{Mixture-of-Experts Architecture}{equation.2.2}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Qwen3-30B-A3B Architecture Parameters.\relax }}{2}{table.caption.2}\protected@file@percent }
+\providecommand*\caption@xref[2]{\@setref\relax\@undefined{#1}}
+\newlabel{tab:model}{{1}{2}{Qwen3-30B-A3B Architecture Parameters.\relax }{table.caption.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.2}Speculative Decoding}{2}{subsection.2.2}\protected@file@percent }
+\newlabel{sec:sd}{{2.2}{2}{Speculative Decoding}{subsection.2.2}{}}
+\newlabel{eq:dense-speedup}{{3}{2}{Speculative Decoding}{equation.2.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.3}The MoE Amplification Problem}{2}{subsection.2.3}\protected@file@percent }
+\newlabel{sec:maf}{{2.3}{2}{The MoE Amplification Problem}{subsection.2.3}{}}
+\@writefile{toc}{\contentsline {paragraph}{Cost model.}{2}{section*.3}\protected@file@percent }
+\newlabel{eq:cost-decompose}{{4}{2}{Cost model}{equation.2.4}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces MoE Amplification Factor vs.\ speculation depth $K$ for Qwen3-30B ($N\!=\!128$, $k\!=\!8$). SpecMoE\xspace  reduces the effective MAF by ${\sim }$40\% compared to vanilla EAGLE-3.\relax }}{3}{figure.caption.5}\protected@file@percent }
+\newlabel{fig:maf}{{1}{3}{MoE Amplification Factor vs.\ speculation depth $K$ for Qwen3-30B ($N\!=\!128$, $k\!=\!8$). \sysname reduces the effective MAF by ${\sim }$40\% compared to vanilla EAGLE-3.\relax }{figure.caption.5}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces Theoretical MAF for Qwen3-30B ($N\!=\!128$, $k\!=\!8$).\relax }}{3}{table.caption.6}\protected@file@percent }
+\newlabel{tab:maf-values}{{2}{3}{Theoretical MAF for Qwen3-30B ($N\!=\!128$, $k\!=\!8$).\relax }{table.caption.6}{}}
+\@writefile{toc}{\contentsline {paragraph}{MoE Amplification Factor (MAF).}{3}{section*.4}\protected@file@percent }
+\newlabel{eq:maf}{{5}{3}{MoE Amplification Factor (MAF)}{equation.2.5}{}}
+\newlabel{eq:maf-formula}{{6}{3}{MoE Amplification Factor (MAF)}{equation.2.6}{}}
+\@writefile{toc}{\contentsline {paragraph}{Speedup analysis.}{3}{section*.7}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces Baseline comparison: No-SD vs.\ EAGLE-3 on Qwen3-30B (A6000 + 30\,GB CPU offload).\relax }}{3}{table.caption.11}\protected@file@percent }
+\newlabel{tab:baseline}{{3}{3}{Baseline comparison: No-SD vs.\ EAGLE-3 on Qwen3-30B (A6000 + 30\,GB CPU offload).\relax }{table.caption.11}{}}
+\newlabel{eq:speedup-full}{{7}{3}{Speedup analysis}{equation.2.7}{}}
+\@writefile{toc}{\contentsline {paragraph}{Key insight: SD failure threshold.}{3}{section*.8}\protected@file@percent }
+\newlabel{eq:breakeven}{{8}{3}{Key insight: SD failure threshold}{equation.2.8}{}}
+\@writefile{toc}{\contentsline {paragraph}{Instantiation for Qwen3-30B.}{3}{section*.9}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Empirical Validation.}{3}{section*.10}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.4}Why Scheduling-Level Solutions Are Insufficient}{3}{subsection.2.4}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {4}{\ignorespaces Limitations of scheduling-level MoE+SD solutions.\relax }}{4}{table.caption.12}\protected@file@percent }
+\newlabel{tab:prior}{{4}{4}{Limitations of scheduling-level MoE+SD solutions.\relax }{table.caption.12}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {3}System Design}{4}{section.3}\protected@file@percent }
+\newlabel{sec:design}{{3}{4}{System Design}{section.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}SpecFusedMoE\xspace  : Cross-Token Expert Deduplication}{4}{subsection.3.1}\protected@file@percent }
+\newlabel{sec:specfused}{{3.1}{4}{\specfused : Cross-Token Expert Deduplication}{subsection.3.1}{}}
+\@writefile{toc}{\contentsline {paragraph}{Phase 1: Dispatch Table.}{4}{section*.14}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Phase 2: Expert-Grouped MatMul.}{4}{section*.15}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Phase 3: Active Mask.}{4}{section*.16}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Speculation Divergence Detection}{4}{subsection.3.2}\protected@file@percent }
+\newlabel{sec:sdd}{{3.2}{4}{Speculation Divergence Detection}{subsection.3.2}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {5}{\ignorespaces Memory partition under GPU pressure levels.\relax }}{4}{table.caption.26}\protected@file@percent }
+\newlabel{tab:mempart}{{5}{4}{Memory partition under GPU pressure levels.\relax }{table.caption.26}{}}
+\@writefile{toc}{\contentsline {paragraph}{Divergence Metrics.}{4}{section*.18}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Freeze Decision.}{4}{section*.19}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}Acceptance-Aware Expert Cache}{4}{subsection.3.3}\protected@file@percent }
+\newlabel{sec:cache}{{3.3}{4}{Acceptance-Aware Expert Cache}{subsection.3.3}{}}
+\@writefile{toc}{\contentsline {paragraph}{Cache Design.}{4}{section*.22}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Prefetch Scoring.}{4}{section*.23}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.4}Phase-Aware Control Plane}{4}{subsection.3.4}\protected@file@percent }
+\newlabel{sec:governor}{{3.4}{4}{Phase-Aware Control Plane}{subsection.3.4}{}}
+\@writefile{toc}{\contentsline {paragraph}{Speculation Depth ($K$).}{4}{section*.24}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Memory Partition.}{4}{section*.25}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces SpecMoE\xspace  system architecture. The three operator-level components (SpecFusedMoE\xspace  , SDD\xspace  , Expert Cache) intercept the \texttt  {fused\_moe} operator within vLLM's verify phase, coordinated by the Phase-Aware Governor.\relax }}{5}{figure.caption.13}\protected@file@percent }
+\newlabel{fig:architecture}{{2}{5}{\sysname system architecture. The three operator-level components (\specfused , \sdd , Expert Cache) intercept the \texttt {fused\_moe} operator within vLLM's verify phase, coordinated by the Phase-Aware Governor.\relax }{figure.caption.13}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces Expert load reduction per MoE layer. Naive: each token loads experts independently (32 loads, $K\!=\!3$). Dedup: SpecFusedMoE\xspace  shares experts across tokens (${\sim }$29 loads). +SDD\xspace  : frozen tokens further reduce loads (${\sim }$14).\relax }}{5}{figure.caption.17}\protected@file@percent }
+\newlabel{fig:dedup}{{3}{5}{Expert load reduction per MoE layer. Naive: each token loads experts independently (32 loads, $K\!=\!3$). Dedup: \specfused shares experts across tokens (${\sim }$29 loads). +\sdd : frozen tokens further reduce loads (${\sim }$14).\relax }{figure.caption.17}{}}
+\@writefile{toc}{\contentsline {paragraph}{Acceptance Tracking.}{5}{section*.27}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.5}vLLM Integration}{5}{subsection.3.5}\protected@file@percent }
+\newlabel{sec:integration}{{3.5}{5}{vLLM Integration}{subsection.3.5}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {4}{\ignorespaces SDD\xspace  layer-wise early termination. Tokens $t_2$ and $t_3$ are frozen at layers 20 and 16 respectively after consecutive divergences exceed $\tau _c\!=\!3$, saving all subsequent expert loads.\relax }}{5}{figure.caption.20}\protected@file@percent }
+\newlabel{fig:sdd}{{4}{5}{\sdd layer-wise early termination. Tokens $t_2$ and $t_3$ are frozen at layers 20 and 16 respectively after consecutive divergences exceed $\tau _c\!=\!3$, saving all subsequent expert loads.\relax }{figure.caption.20}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {4}Evaluation}{5}{section.4}\protected@file@percent }
+\newlabel{sec:eval}{{4}{5}{Evaluation}{section.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.1}Setup}{5}{subsection.4.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Hardware.}{5}{section*.28}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Model.}{5}{section*.29}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Baselines.}{5}{section*.30}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Workloads.}{5}{section*.31}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.2}End-to-End Performance}{5}{subsection.4.2}\protected@file@percent }
+\citation{leviathan2023fast}
+\citation{chen2023accelerating}
+\citation{miao2024specinfer}
+\citation{zhou2024distillspec}
+\citation{zhang2024draft}
+\citation{cai2024medusa}
+\citation{li2024eagle}
+\citation{li2024eagle2}
+\citation{li2025eagle3}
+\citation{chen2024sequoia}
+\citation{sun2023spectr}
+\citation{lepikhin2021gshard}
+\citation{fedus2022switch}
+\citation{rajbhandari2022deepspeed}
+\citation{hwang2023tutel}
+\citation{eliseev2023mixtral}
+\citation{hwang2023pregated}
+\citation{xue2024moeinfinity}
+\citation{lu2024notall,komatsuzaki2023sparse,muqeeth2024soft}
+\citation{gale2023megablocks}
+\citation{kwon2023vllm}
+\@writefile{lof}{\contentsline {figure}{\numberline {5}{\ignorespaces Tiered expert cache architecture. With 8\,GB GPU budget at 9.0\,MB/expert, ${\sim }$910 slots cover 14.8\% of all experts; effective hit rate reaches 85\% with prefetching.\relax }}{6}{figure.caption.21}\protected@file@percent }
+\newlabel{fig:cache}{{5}{6}{Tiered expert cache architecture. With 8\,GB GPU budget at 9.0\,MB/expert, ${\sim }$910 slots cover 14.8\% of all experts; effective hit rate reaches 85\% with prefetching.\relax }{figure.caption.21}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {6}{\ignorespaces Workload profiles.\relax }}{6}{table.caption.32}\protected@file@percent }
+\newlabel{tab:workloads}{{6}{6}{Workload profiles.\relax }{table.caption.32}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.3}MAF Reduction}{6}{subsection.4.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.4}Memory Pressure Sensitivity}{6}{subsection.4.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.5}Speculation Depth Sensitivity}{6}{subsection.4.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.6}Ablation Study}{6}{subsection.4.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{SDD\xspace  Precision.}{6}{section*.39}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Cache Hit Rate.}{6}{section*.40}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.7}MAF Model Validation}{6}{subsection.4.7}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {6}{\ignorespaces End-to-end throughput comparison. EAGLE-3 \emph  {degrades} performance vs.\ No-SD; SpecMoE\xspace  recovers and surpasses both.\relax }}{6}{figure.caption.33}\protected@file@percent }
+\newlabel{fig:e2e}{{6}{6}{End-to-end throughput comparison. EAGLE-3 \emph {degrades} performance vs.\ No-SD; \sysname recovers and surpasses both.\relax }{figure.caption.33}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {7}{\ignorespaces Serve benchmark (8 requests, 1.0 QPS, Medium workload).\relax }}{6}{table.caption.34}\protected@file@percent }
+\newlabel{tab:e2e-serve}{{7}{6}{Serve benchmark (8 requests, 1.0 QPS, Medium workload).\relax }{table.caption.34}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.8}Summary of Key Results}{6}{subsection.4.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5}Related Work}{6}{section.5}\protected@file@percent }
+\newlabel{sec:related}{{5}{6}{Related Work}{section.5}{}}
+\@writefile{toc}{\contentsline {paragraph}{Speculative Decoding.}{6}{section*.43}\protected@file@percent }
+\citation{yi2025moespec}
+\citation{chen2024cascade}
+\citation{jin2024spmoe}
+\citation{park2025moespac}
+\citation{dao2022flashattention,dao2024flashattention2}
+\citation{kwon2023vllm}
+\bibstyle{plain}
+\bibdata{specmoe}
+\bibcite{cai2024medusa}{1}
+\bibcite{chen2023accelerating}{2}
+\bibcite{chen2024sequoia}{3}
+\bibcite{chen2024cascade}{4}
+\bibcite{dao2024flashattention2}{5}
+\bibcite{dao2022flashattention}{6}
+\bibcite{eliseev2023mixtral}{7}
+\@writefile{lof}{\contentsline {figure}{\numberline {7}{\ignorespaces Incremental speedup contribution of each SpecMoE\xspace  component at $K\!=\!3$. The dashed line marks $S\!=\!1$ (breakeven). Expert cache pushes the system past breakeven.\relax }}{7}{figure.caption.35}\protected@file@percent }
+\newlabel{fig:ablation}{{7}{7}{Incremental speedup contribution of each \sysname component at $K\!=\!3$. The dashed line marks $S\!=\!1$ (breakeven). Expert cache pushes the system past breakeven.\relax }{figure.caption.35}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {8}{\ignorespaces Per-component MAF\xspace  breakdown and speedup ($K\!=\!3$).\relax }}{7}{table.caption.36}\protected@file@percent }
+\newlabel{tab:ablation}{{8}{7}{Per-component \maf breakdown and speedup ($K\!=\!3$).\relax }{table.caption.36}{}}
+\@writefile{toc}{\contentsline {paragraph}{MoE Inference.}{7}{section*.44}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{MoE $\times $ SD.}{7}{section*.45}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Operator Co-design.}{7}{section*.46}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {6}Conclusion}{7}{section.6}\protected@file@percent }
+\newlabel{sec:conclusion}{{6}{7}{Conclusion}{section.6}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {8}{\ignorespaces Throughput across GPU memory pressures (70--90\% utilization). SpecMoE\xspace  maintains a consistent 1.31$\times $ speedup.\relax }}{7}{figure.caption.37}\protected@file@percent }
+\newlabel{fig:pressure}{{8}{7}{Throughput across GPU memory pressures (70--90\% utilization). \sysname maintains a consistent 1.31$\times $ speedup.\relax }{figure.caption.37}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {9}{\ignorespaces $K$-value sweep without SpecMoE\xspace  (high memory pressure).\relax }}{7}{table.caption.38}\protected@file@percent }
+\newlabel{tab:ksweep}{{9}{7}{$K$-value sweep without \sysname (high memory pressure).\relax }{table.caption.38}{}}
+\bibcite{fedus2022switch}{8}
+\bibcite{gale2023megablocks}{9}
+\bibcite{hwang2023tutel}{10}
+\bibcite{hwang2023pregated}{11}
+\bibcite{jin2024spmoe}{12}
+\bibcite{komatsuzaki2023sparse}{13}
+\bibcite{kwon2023vllm}{14}
+\bibcite{lepikhin2021gshard}{15}
+\bibcite{leviathan2023fast}{16}
+\bibcite{li2024eagle2}{17}
+\bibcite{li2024eagle}{18}
+\bibcite{li2025eagle3}{19}
+\bibcite{lu2024notall}{20}
+\bibcite{miao2024specinfer}{21}
+\bibcite{muqeeth2024soft}{22}
+\bibcite{park2025moespac}{23}
+\bibcite{rajbhandari2022deepspeed}{24}
+\bibcite{sun2023spectr}{25}
+\bibcite{xue2024moeinfinity}{26}
+\bibcite{yi2025moespec}{27}
+\bibcite{zhang2024draft}{28}
+\bibcite{zhou2024distillspec}{29}
+\@writefile{lof}{\contentsline {figure}{\numberline {9}{\ignorespaces Speedup vs.\ acceptance rate at $K\!=\!3$. SpecMoE\xspace  shifts the breakeven from $\bar  {\alpha }\!=\!0.56$ to $\bar  {\alpha }\!=\!0.19$, making SD viable for typical MoE acceptance rates. The $\times $ marker shows the measured operating point ($\bar  {\alpha }\!=\!0.46$, $S\!=\!0.91$).\relax }}{8}{figure.caption.41}\protected@file@percent }
+\newlabel{fig:speedup-vs-alpha}{{9}{8}{Speedup vs.\ acceptance rate at $K\!=\!3$. \sysname shifts the breakeven from $\thetabar \!=\!0.56$ to $\thetabar \!=\!0.19$, making SD viable for typical MoE acceptance rates. The $\times $ marker shows the measured operating point ($\thetabar \!=\!0.46$, $S\!=\!0.91$).\relax }{figure.caption.41}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {10}{\ignorespaces Summary of key results.\relax }}{8}{table.caption.42}\protected@file@percent }
+\newlabel{tab:summary}{{10}{8}{Summary of key results.\relax }{table.caption.42}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {A}Theoretical Derivations}{9}{appendix.1.A}\protected@file@percent }
+\newlabel{app:theory}{{A}{9}{Theoretical Derivations}{appendix.1.A}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {A.1}Notation and Setup}{9}{subsection.1.A.1}\protected@file@percent }
+\newlabel{app:notation}{{A.1}{9}{Notation and Setup}{subsection.1.A.1}{}}
+\@writefile{toc}{\contentsline {paragraph}{Effective output length.}{9}{section*.48}\protected@file@percent }
+\newlabel{eq:neff}{{11}{9}{Effective output length}{equation.1.A.11}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {A.2}Derivation of the MAF Closed Form}{9}{subsection.1.A.2}\protected@file@percent }
+\newlabel{app:maf-proof}{{A.2}{9}{Derivation of the MAF Closed Form}{subsection.1.A.2}{}}
+\newlabel{eq:EU-indicator}{{12}{9}{Derivation of the MAF Closed Form}{equation.1.A.12}{}}
+\newlabel{eq:miss-prob}{{13}{9}{Derivation of the MAF Closed Form}{equation.1.A.13}{}}
+\newlabel{eq:all-miss}{{14}{9}{Derivation of the MAF Closed Form}{equation.1.A.14}{}}
+\newlabel{eq:EU-closed}{{15}{9}{Derivation of the MAF Closed Form}{equation.1.A.15}{}}
+\newlabel{eq:maf-app}{{16}{9}{Derivation of the MAF Closed Form}{equation.1.A.16}{}}
+\@writefile{toc}{\contentsline {paragraph}{Sanity checks.}{9}{section*.49}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Instantiation.}{9}{section*.50}\protected@file@percent }
+\newlabel{eq:maf-qwen}{{17}{9}{Instantiation}{equation.1.A.17}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {A.3}Derivation of the Speedup Formula}{10}{subsection.1.A.3}\protected@file@percent }
+\newlabel{app:speedup-proof}{{A.3}{10}{Derivation of the Speedup Formula}{subsection.1.A.3}{}}
+\newlabel{eq:tput-ar}{{18}{10}{Derivation of the Speedup Formula}{equation.1.A.18}{}}
+\newlabel{eq:Cround}{{19}{10}{Derivation of the Speedup Formula}{equation.1.A.19}{}}
+\newlabel{eq:tput-sd}{{20}{10}{Derivation of the Speedup Formula}{equation.1.A.20}{}}
+\newlabel{eq:S-derivation}{{21}{10}{Derivation of the Speedup Formula}{equation.1.A.21}{}}
+\newlabel{eq:threshold-derivation}{{22}{10}{Derivation of the Speedup Formula}{equation.1.A.22}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {A.4}Monotonicity and Structural Properties}{10}{subsection.1.A.4}\protected@file@percent }
+\newlabel{app:monotone}{{A.4}{10}{Monotonicity and Structural Properties}{subsection.1.A.4}{}}
+\newlabel{eq:structural-failure}{{23}{10}{Monotonicity and Structural Properties}{equation.1.A.23}{}}
+\newlabel{eq:beta-crit}{{24}{10}{Monotonicity and Structural Properties}{equation.1.A.24}{}}
+\@writefile{toc}{\contentsline {paragraph}{Sensitivity analysis.}{10}{section*.51}\protected@file@percent }
+\newlabel{eq:dS-dalpha}{{25}{10}{Sensitivity analysis}{equation.1.A.25}{}}
+\newlabel{eq:dS-dbeta}{{26}{10}{Sensitivity analysis}{equation.1.A.26}{}}
+\newlabel{eq:dS-dMAF}{{27}{10}{Sensitivity analysis}{equation.1.A.27}{}}
+\@writefile{toc}{\contentsline {paragraph}{Summary of the proof chain.}{10}{section*.52}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {10}{\ignorespaces Logical dependency graph of the theoretical results. Solid arrows denote ``is used by''.\relax }}{11}{figure.caption.53}\protected@file@percent }
+\newlabel{fig:proof-chain}{{10}{11}{Logical dependency graph of the theoretical results. Solid arrows denote ``is used by''.\relax }{figure.caption.53}{}}
+\gdef \@abspage@last{11}

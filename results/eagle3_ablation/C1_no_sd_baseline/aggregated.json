@@ -1,0 +1,16 @@
+{
+  "config_id": 1,
+  "label": "C1_no_sd_baseline",
+  "description": "No-SD Baseline (pure AR)",
+  "status": "ok",
+  "repetitions": 1,
+  "output_tps": 1.9882213444571217,
+  "mean_ttft_ms": 50860.531579254064,
+  "mean_e2e_s": 50.86076017718391,
+  "total_output_tokens": 4955.0,
+  "total_time_s": 2492.177248682012,
+  "p50_ttft_ms": 61096.737482002936,
+  "p95_ttft_ms": 67448.16691800952,
+  "p50_e2e_s": 61.09697569801938,
+  "p95_e2e_s": 67.44838932005223
+}

@@ -1,0 +1,47 @@
+/opt/miniconda3/envs/moe-sd/lib/python3.10/site-packages/vllm/benchmarks/throughput.py:526: UserWarning: --random-range-ratio will be ignored since                 --dataset-name is not 'random'.
+  validate_args(args)
+/opt/miniconda3/envs/moe-sd/lib/python3.10/site-packages/vllm/benchmarks/throughput.py:526: UserWarning: --prefix-len will be ignored since --dataset-name                 is not 'random', 'sonnet', or not set.
+  validate_args(args)
+
+Loading safetensors checkpoint shards:   0% Completed | 0/16 [00:00<?, ?it/s]
+
+Loading safetensors checkpoint shards:   6% Completed | 1/16 [00:00<00:10,  1.42it/s]
+
+Loading safetensors checkpoint shards:  12% Completed | 2/16 [00:01<00:09,  1.48it/s]
+
+Loading safetensors checkpoint shards:  19% Completed | 3/16 [00:02<00:08,  1.48it/s]
+
+Loading safetensors checkpoint shards:  25% Completed | 4/16 [00:02<00:08,  1.39it/s]
+
+Loading safetensors checkpoint shards:  31% Completed | 5/16 [00:03<00:08,  1.37it/s]
+
+Loading safetensors checkpoint shards:  38% Completed | 6/16 [00:04<00:07,  1.41it/s]
+
+Loading safetensors checkpoint shards:  44% Completed | 7/16 [00:05<00:06,  1.36it/s]
+
+Loading safetensors checkpoint shards:  50% Completed | 8/16 [00:05<00:05,  1.34it/s]
+
+Loading safetensors checkpoint shards:  56% Completed | 9/16 [00:06<00:05,  1.34it/s]
+
+Loading safetensors checkpoint shards:  62% Completed | 10/16 [00:06<00:03,  1.73it/s]
+
+Loading safetensors checkpoint shards:  69% Completed | 11/16 [00:07<00:03,  1.61it/s]
+
+Loading safetensors checkpoint shards:  75% Completed | 12/16 [00:08<00:02,  1.57it/s]
+
+Loading safetensors checkpoint shards:  81% Completed | 13/16 [00:08<00:01,  1.54it/s]
+
+Loading safetensors checkpoint shards:  88% Completed | 14/16 [00:09<00:01,  1.52it/s]
+
+Loading safetensors checkpoint shards:  94% Completed | 15/16 [00:10<00:00,  1.47it/s]
+
+Loading safetensors checkpoint shards: 100% Completed | 16/16 [00:10<00:00,  1.41it/s]
+
+Loading safetensors checkpoint shards: 100% Completed | 16/16 [00:10<00:00,  1.46it/s]
+
+
+Processed prompts:   0%|          | 0/50 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]
+Processed prompts:   2%|▏         | 1/50 [09:19<7:37:16, 559.94s/it, est. speed input: 0.02 toks/s, output: 0.23 toks/s]
+Processed prompts:   6%|▌         | 3/50 [09:24<1:54:55, 146.72s/it, est. speed input: 0.07 toks/s, output: 0.68 toks/s]
+Processed prompts: 100%|██████████| 50/50 [09:24<00:00, 11.28s/it, est. speed input: 5.64 toks/s, output: 11.35 toks/s] 
+[rank0]:[W319 03:41:51.967890243 ProcessGroupNCCL.cpp:1496] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())

@@ -1,0 +1,23 @@
+Traceback (most recent call last):
+  File "/root/MoE-SD/results/full_experiment/process_b_throughput/harness.py", line 169, in <module>
+    main()
+  File "/root/MoE-SD/results/full_experiment/process_b_throughput/harness.py", line 91, in main
+    llm = LLM(
+  File "/opt/miniconda3/envs/moe-sd/lib/python3.10/site-packages/vllm/utils.py", line 1161, in inner
+    return fn(*args, **kwargs)
+  File "/opt/miniconda3/envs/moe-sd/lib/python3.10/site-packages/vllm/entrypoints/llm.py", line 247, in __init__
+    self.llm_engine = LLMEngine.from_engine_args(
+  File "/opt/miniconda3/envs/moe-sd/lib/python3.10/site-packages/vllm/engine/llm_engine.py", line 503, in from_engine_args
+    vllm_config = engine_args.create_engine_config(usage_context)
+  File "/opt/miniconda3/envs/moe-sd/lib/python3.10/site-packages/vllm/engine/arg_utils.py", line 1165, in create_engine_config
+    speculative_config = self.create_speculative_config(
+  File "/opt/miniconda3/envs/moe-sd/lib/python3.10/site-packages/vllm/engine/arg_utils.py", line 1073, in create_speculative_config
+    speculative_config = SpeculativeConfig.from_dict(
+  File "/opt/miniconda3/envs/moe-sd/lib/python3.10/site-packages/vllm/config.py", line 2268, in from_dict
+    return cls(**dict_value)
+  File "<string>", line 25, in __init__
+  File "/opt/miniconda3/envs/moe-sd/lib/python3.10/site-packages/vllm/config.py", line 2451, in __post_init__
+    self._verify_args()
+  File "/opt/miniconda3/envs/moe-sd/lib/python3.10/site-packages/vllm/config.py", line 2590, in _verify_args
+    raise ValueError(
+ValueError: Eagle3 is only supported for Llama models. Got self.target_model_config.hf_text_config.model_type='qwen3_moe'

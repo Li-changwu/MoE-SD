@@ -1,0 +1,168 @@
+\begin{thebibliography}{10}
+
+\bibitem{cai2024medusa}
+Tianle Cai, Yuhong Li, Zhengyang Geng, Hongwu Peng, et~al.
+\newblock Medusa: Simple {LLM} inference acceleration framework with multiple
+  decoding heads.
+\newblock In {\em ICML}, 2024.
+
+\bibitem{chen2023accelerating}
+Charlie Chen, Sebastian Borgeaud, Geoffrey Irving, Jean-Baptiste Lespiau,
+  Laurent Sifre, and John Jumper.
+\newblock Accelerating large language model decoding with speculative sampling.
+\newblock {\em arXiv:2302.01318}, 2023.
+
+\bibitem{chen2024sequoia}
+Zhuoming Chen, Xupeng Miao, Zhihao Zhang, and Zhihao Jia.
+\newblock Sequoia: Scalable, robust, and hardware-aware speculative decoding.
+\newblock In {\em NeurIPS}, 2024.
+
+\bibitem{chen2024cascade}
+Ziyi Chen, Ryan May, et~al.
+\newblock Cascade speculative drafting for even faster {LLM} inference.
+\newblock {\em arXiv}, 2024.
+
+\bibitem{dao2024flashattention2}
+Tri Dao.
+\newblock {FlashAttention-2}: Faster attention with better parallelism and work
+  partitioning.
+\newblock In {\em ICLR}, 2024.
+
+\bibitem{dao2022flashattention}
+Tri Dao, Daniel~Y. Fu, Stefano Ermon, Atri Rudra, and Christopher R{\'e}.
+\newblock {FlashAttention}: Fast and memory-efficient exact attention with
+  {IO}-awareness.
+\newblock In {\em NeurIPS}, 2022.
+
+\bibitem{eliseev2023mixtral}
+Eldar Eliseev and Denis Mazur.
+\newblock Fast inference of mixture-of-experts language models with offloading.
+\newblock {\em arXiv:2312.17238}, 2023.
+
+\bibitem{fedus2022switch}
+William Fedus, Barret Zoph, and Noam Shazeer.
+\newblock Switch transformers: Scaling to trillion parameter models with simple
+  and efficient sparsity.
+\newblock {\em JMLR}, 2022.
+
+\bibitem{gale2023megablocks}
+Trevor Gale, Deepak Narayanan, Cliff Young, and Matei Zaharia.
+\newblock {MegaBlocks}: Efficient sparse training with mixture-of-experts.
+\newblock In {\em MLSys}, 2023.
+
+\bibitem{hwang2023tutel}
+Changho Hwang, Wei Cui, Yifan Xiong, et~al.
+\newblock Tutel: Adaptive mixture-of-experts at scale.
+\newblock In {\em MLSys}, 2023.
+
+\bibitem{hwang2023pregated}
+Sang-Yun Hwang, Kijun Yi, Giovanni Tarolli, and Nam Kim.
+\newblock Pre-gated {MoE}: An algorithm-system co-design for fast and scalable
+  mixture-of-experts inference.
+\newblock {\em arXiv:2308.12066}, 2023.
+
+\bibitem{jin2024spmoe}
+Yifan Jin et~al.
+\newblock {SP-MoE}: Efficient serving of mixture-of-experts models with
+  separated prefill and decode.
+\newblock {\em arXiv}, 2024.
+
+\bibitem{komatsuzaki2023sparse}
+Aran Komatsuzaki, Joan Puigcerver, et~al.
+\newblock Sparse upcycling: Training mixture-of-experts from dense checkpoints.
+\newblock In {\em ICLR}, 2023.
+
+\bibitem{kwon2023vllm}
+Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, et~al.
+\newblock Efficient memory management for large language model serving with
+  {PagedAttention}.
+\newblock In {\em SOSP}, 2023.
+
+\bibitem{lepikhin2021gshard}
+Dmitry Lepikhin, HyoukJoong Lee, Yuanzhong Xu, et~al.
+\newblock {GShard}: Scaling giant models with conditional computation and
+  automatic sharding.
+\newblock In {\em ICLR}, 2021.
+
+\bibitem{leviathan2023fast}
+Yaniv Leviathan, Matan Kalman, and Yossi Matias.
+\newblock Fast inference from transformers via speculative decoding.
+\newblock In {\em ICML}, 2023.
+
+\bibitem{li2024eagle2}
+Yuhui Li, Fangyun Wei, Chao Zhang, and Hongyang Zhang.
+\newblock {EAGLE-2}: Faster inference of language models with dynamic draft
+  trees.
+\newblock In {\em EMNLP}, 2024.
+
+\bibitem{li2024eagle}
+Yuhui Li, Fangyun Wei, Chao Zhang, and Hongyang Zhang.
+\newblock {EAGLE}: Speculative sampling requires rethinking feature
+  uncertainty.
+\newblock In {\em ICML}, 2024.
+
+\bibitem{li2025eagle3}
+Yuhui Li, Yuntian Zhong, et~al.
+\newblock {EAGLE-3}: Scaling up inference acceleration of large language models
+  via training-free speculative sampling.
+\newblock {\em arXiv}, 2025.
+
+\bibitem{lu2024notall}
+Rui Lu et~al.
+\newblock Not all experts are equal: Efficient expert pruning and skipping for
+  mixture of experts large language models.
+\newblock In {\em ACL}, 2024.
+
+\bibitem{miao2024specinfer}
+Xupeng Miao, Gabriele Oliaro, Zhihao Zhang, et~al.
+\newblock {SpecInfer}: Accelerating generative {LLM} serving with tree-based
+  speculative inference and verification.
+\newblock In {\em ASPLOS}, 2024.
+
+\bibitem{muqeeth2024soft}
+Yasaman Muqeeth, Haokun Liu, Yanzhe Liu, and Colin Raffel.
+\newblock Soft merging of experts with adaptive routing.
+\newblock {\em TMLR}, 2024.
+
+\bibitem{park2025moespac}
+Kwangsoo Park et~al.
+\newblock {MoE-SpAc}: Speculative expert activation for efficient {MoE}
+  serving.
+\newblock {\em arXiv}, 2025.
+
+\bibitem{rajbhandari2022deepspeed}
+Samyam Rajbhandari, Conglong Li, Zhewei Yao, et~al.
+\newblock {DeepSpeed-MoE}: Advancing mixture-of-experts inference and training
+  to power next-generation {AI} scale.
+\newblock In {\em ICML}, 2022.
+
+\bibitem{sun2023spectr}
+Mingjie Sun, Xinlei Zhong, Hao Jia, and Zhen Dong.
+\newblock {SpecTr}: Fast speculative decoding via optimal transport.
+\newblock In {\em NeurIPS}, 2023.
+
+\bibitem{xue2024moeinfinity}
+Leyang Xue, Jiaao Zheng, Yao Li, et~al.
+\newblock {MoE-Infinity}: Activation-aware expert offloading for efficient
+  {MoE} serving.
+\newblock {\em arXiv:2401.14361}, 2024.
+
+\bibitem{yi2025moespec}
+Seungwon Yi et~al.
+\newblock {MoE-Spec}: {MoE}-based speculative decoding with expert-aware
+  budgeting.
+\newblock {\em arXiv}, 2025.
+
+\bibitem{zhang2024draft}
+Jun Zhang, Jue Wang, Hao Li, et~al.
+\newblock Draft \& verify: Lossless large language model acceleration via
+  self-speculative decoding.
+\newblock In {\em ACL}, 2024.
+
+\bibitem{zhou2024distillspec}
+Yongchao Zhou, Kaifeng Lyu, Ankit~Singh Rawat, et~al.
+\newblock {DistillSpec}: Improving speculative decoding via knowledge
+  distillation.
+\newblock In {\em ICLR}, 2024.
+
+\end{thebibliography}

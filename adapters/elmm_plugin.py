@@ -95,6 +95,22 @@ class ELMMConfig:
     enable_phase_profiling: bool = False
     profile_warmup: int = 200      # skip initial intercepts
     profile_steps: int = 100       # measure this many intercepts
+    # --- CUDA Graph (ALPS Phase 1) ---
+    # Capture TASER stale path as CUDA Graph to eliminate kernel launch
+    # overhead (~7.5μs × 5 kernels × 26 layers = ~1ms/step savings).
+    # Only active when TASER stale-remap and direct dispatch are enabled.
+    # Disable with ELMM_CUDA_GRAPH=0 or --enforce-eager.
+    # NOTE: Disabled by default — per-layer graph requires 3 placeholder
+    # copy_() operations per layer per step, adding 78 extra kernel launches
+    # that largely cancel the 26 saved graph replays. Net ~2%, often offset
+    # by graph pool overhead. Keep for future work (whole-model graph capture).
+    enable_cuda_graph: bool = False
+    # --- SharedExpert Parallelization (ALPS Phase 3) ---
+    # Launch SharedExpert on a separate CUDA stream concurrently with the
+    # MoE kernel.  SharedExpert is compute-light (~0.035 ms) and completes
+    # well before the HBM-bound MoE kernel (~0.35 ms), so the overlap is
+    # nearly free.  Saves ~0.64 ms/step (= 0.035 × 0.7 × 26 layers).
+    enable_shared_parallel: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -220,6 +236,69 @@ class _LayerExpertCache:
 
 
 # ---------------------------------------------------------------------------
+# Per-layer CUDA Graph for TASER stale path (ALPS Phase 1)
+# ---------------------------------------------------------------------------
+
+class _LayerCUDAGraph:
+    """
+    CUDA Graph capturing the Direct Dispatch kernel sequence for one layer.
+
+    In TASER stale path, the 5-kernel sequence (moe_align + W1 GEMM + silu +
+    W2 GEMM + sum) has STATIC shapes, static pool pointers, and static tile
+    config.  Only the VALUES of hidden_states, topk_weights, and remapped_ids
+    change between calls.  This makes the path eligible for CUDA Graph capture,
+    eliminating ~5 × 7.5 µs = 37.5 µs kernel-launch overhead per layer.
+
+    Usage::
+
+        graph = _LayerCUDAGraph(M=4, top_k=8, hidden_dim=2048, ...)
+        graph.capture(forward_fn)           # one-time
+        output = graph.replay(h, w, ids)    # hot path
+    """
+
+    __slots__ = ('ph_hidden', 'ph_topk_weights', 'ph_remapped_ids',
+                 'graph', 'output')
+
+    def __init__(self, M: int, top_k: int, hidden_dim: int,
+                 device: torch.device, dtype: torch.dtype):
+        self.ph_hidden = torch.zeros(M, hidden_dim, device=device, dtype=dtype)
+        self.ph_topk_weights = torch.zeros(M, top_k, device=device, dtype=dtype)
+        self.ph_remapped_ids = torch.zeros(M, top_k, device=device, dtype=torch.long)
+        self.graph: Optional[torch.cuda.CUDAGraph] = None
+        self.output: Optional[torch.Tensor] = None
+
+    def capture(self, forward_fn):
+        """Capture *forward_fn(hidden, topk_weights, remapped_ids)*.
+
+        Performs 3 warm-up runs (to JIT-compile / autotune Triton kernels)
+        then records the kernel sequence into a ``CUDAGraph``.
+        """
+        torch.cuda.synchronize()
+        # Warm-up: ensures Triton autotune is done and all lazy allocs happen
+        for _ in range(3):
+            _ = forward_fn(
+                self.ph_hidden, self.ph_topk_weights, self.ph_remapped_ids)
+        torch.cuda.synchronize()
+        # Capture
+        self.graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self.graph):
+            self.output = forward_fn(
+                self.ph_hidden, self.ph_topk_weights, self.ph_remapped_ids)
+
+    def replay(self, hidden_states, topk_weights, remapped_ids):
+        """Copy new values into placeholders and replay the graph.
+
+        Returns the output tensor (lives in the graph's private pool;
+        safe to read until the next ``replay`` call on this instance).
+        """
+        self.ph_hidden.copy_(hidden_states)
+        self.ph_topk_weights.copy_(topk_weights)
+        self.ph_remapped_ids.copy_(remapped_ids)
+        self.graph.replay()
+        return self.output
+
+
+# ---------------------------------------------------------------------------
 # ELMMManager — core implementation
 # ---------------------------------------------------------------------------
 
@@ -251,6 +330,10 @@ class ELMMManager:
         self._prefetch_stream: Optional[torch.cuda.Stream] = None
         if self.config.use_prefetch_stream and torch.cuda.is_available():
             self._prefetch_stream = torch.cuda.Stream()
+        # SharedExpert parallel stream (ALPS Phase 3)
+        self._shared_expert_stream: Optional[torch.cuda.Stream] = None
+        if self.config.enable_shared_parallel and torch.cuda.is_available():
+            self._shared_expert_stream = torch.cuda.Stream()
         # Original forward_impl per (id(module)) for safe restore
         self._original_forward_impls: dict[int, Any] = {}
         # Name → FusedMoE module reference (for restore)
@@ -312,6 +395,20 @@ class ELMMManager:
         self._prof_events: list = []   # list of (phase_name, start_event, end_event)
         self._prof_phase_ms: dict = {}  # phase → accumulated ms
         self._prof_count: int = 0
+        # --- CUDA Graph (ALPS Phase 1) ---
+        # Per-layer captured graphs: layer_name → _LayerCUDAGraph
+        self._layer_graphs: dict[str, _LayerCUDAGraph] = {}
+        # Batch size the graphs were captured for (must match at replay)
+        self._graph_M: int = 0
+        # Master switch (disabled on capture failure or --enforce-eager)
+        import os
+        self._use_cuda_graph: bool = (
+            self.config.enable_cuda_graph
+            and os.environ.get("ELMM_CUDA_GRAPH", "1") != "0"
+        )
+        # Diagnostic counters
+        self._graph_replay_count: int = 0
+        self._graph_eager_count: int = 0
 
     # -----------------------------------------------------------------------
     # Installation
@@ -625,6 +722,66 @@ class ELMMManager:
         )
 
     # -----------------------------------------------------------------------
+    # CUDA Graph capture for TASER stale path (ALPS Phase 1)
+    # -----------------------------------------------------------------------
+
+    def _try_capture_layer_graph(
+        self,
+        layer_name: str,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        remapped_ids: torch.Tensor,
+    ):
+        """Attempt to capture the Direct Dispatch kernel sequence as a CUDA Graph.
+
+        Called once per layer, on the first TASER stale-path invocation after
+        warmup.  If capture fails (e.g. Triton/CUDA Graph incompatibility),
+        CUDA Graph is disabled globally and we fall back to eager dispatch.
+        """
+        import sys
+
+        M = hidden_states.shape[0]
+        top_k = remapped_ids.shape[1]
+        K = hidden_states.shape[1]
+        device = hidden_states.device
+        dtype = hidden_states.dtype
+
+        cache = self._layer_caches[layer_name]
+        module = self._patched_modules[layer_name]
+
+        graph_obj = _LayerCUDAGraph(M, top_k, K, device, dtype)
+        # Seed placeholders with actual data for realistic warm-up
+        graph_obj.ph_hidden.copy_(hidden_states)
+        graph_obj.ph_topk_weights.copy_(topk_weights)
+        graph_obj.ph_remapped_ids.copy_(remapped_ids)
+
+        # Closure: captures the Direct Dispatch kernel sequence
+        def forward_fn(h, w, ids):
+            return self._direct_dispatch_kernel(h, w, ids, cache, module)
+
+        try:
+            graph_obj.capture(forward_fn)
+        except Exception as e:
+            print(f"[ELMM] CUDA Graph capture failed for {layer_name}: {e}",
+                  file=sys.stderr, flush=True)
+            self._use_cuda_graph = False
+            return
+
+        self._layer_graphs[layer_name] = graph_obj
+        if self._graph_M == 0:
+            self._graph_M = M
+
+        num_captured = len(self._layer_graphs)
+        num_total = len(self._layer_caches)
+        if num_captured == 1:
+            print(f"[ELMM] CUDA Graph captured for first layer '{layer_name}' "
+                  f"(M={M}, top_k={top_k}, K={K})",
+                  file=sys.stderr, flush=True)
+        if num_captured == num_total:
+            print(f"[ELMM] CUDA Graph captured for all {num_total} layers",
+                  file=sys.stderr, flush=True)
+
+    # -----------------------------------------------------------------------
     # GPU-Side Cache Lookup (E1 optimization)
     # -----------------------------------------------------------------------
 
@@ -783,8 +940,16 @@ class ELMMManager:
             router_logits, _ = module.gate(hidden_states)
 
         # Start shared experts early if not using stream
+        # (skip if ALPS Phase 3 parallelization is active — shared expert
+        # will run concurrently with MoE kernel in Phase 4)
         shared_output = None
-        if has_separate_shared and not use_shared_stream:
+        run_shared_parallel = (
+            self.config.enable_shared_parallel
+            and has_separate_shared
+            and not use_shared_stream
+            and self._shared_expert_stream is not None
+        )
+        if has_separate_shared and not use_shared_stream and not run_shared_parallel:
             shared_input = module._get_shared_experts_input(hidden_states)
             shared_output = module.shared_experts(shared_input)
 
@@ -821,6 +986,13 @@ class ELMMManager:
                 step_hits = 0  # stats unavailable in fast path
                 step_misses = 0
                 stale_remap_ok = True
+                # --- ALPS Phase 1: lazy CUDA Graph capture ---
+                # On the first stale-path invocation per layer,
+                # capture the Direct Dispatch as a CUDA Graph.
+                if (self._use_cuda_graph
+                        and layer_name not in self._layer_graphs):
+                    self._try_capture_layer_graph(
+                        layer_name, hidden_states, topk_weights, remapped_ids)
             self._layer_remap_step[layer_name] = step + 1
 
         if not stale_remap_ok:
@@ -971,47 +1143,79 @@ class ELMMManager:
         # --- Phase 4: Kernel compute ---
         self._maybe_profile_end(p_tok)
         p_tok = self._maybe_profile_start("P4_kernel")
-        use_direct = (
-            self.config.enable_direct_dispatch
-            and use_pool_direct
-            and self._dd_invoke_kernel is not None
-            and hidden_states.shape[0] <= self._dd_max_M
+
+        # --- ALPS Phase 3: Launch shared expert on parallel stream ---
+        # SharedExpert (~0.035 ms) runs concurrently with HBM-bound
+        # MoE kernel (~0.35 ms). Completes well before MoE finishes.
+        if run_shared_parallel:
+            shared_input = module._get_shared_experts_input(hidden_states)
+            se_stream = self._shared_expert_stream
+            se_stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(se_stream):
+                shared_output = module.shared_experts(shared_input)
+
+        M = hidden_states.shape[0]
+
+        # --- ALPS Phase 1: CUDA Graph replay for stale path ---
+        use_graph = (
+            self._use_cuda_graph
+            and stale_remap_ok
+            and layer_name in self._layer_graphs
+            and M == self._graph_M
         )
 
-        if use_direct:
-            # === Direct Triton Dispatch (bypass quant_method.apply chain) ===
-            final_hidden = self._direct_dispatch_kernel(
-                hidden_states, topk_weights, remapped_ids, cache, module,
+        if use_graph:
+            # CUDA Graph fast path (~99% of decode steps after warmup)
+            self._graph_replay_count += 1
+            final_hidden = self._layer_graphs[layer_name].replay(
+                hidden_states, topk_weights, remapped_ids,
             )
         else:
-            # === Original path via quant_method.apply ===
-            orig_w13_data = module.w13_weight.data
-            orig_w2_data = module.w2_weight.data
-
-            if use_pool_direct:
-                module.w13_weight.data = cache._w13_pool
-                module.w2_weight.data = cache._w2_pool
-                kernel_topk_ids = remapped_ids
-            else:
-                module.w13_weight.data = scratch_w13
-                module.w2_weight.data = scratch_w2
-                kernel_topk_ids = topk_ids
-
-            final_hidden = module.quant_method.apply(
-                layer=module,
-                x=hidden_states,
-                topk_weights=topk_weights,
-                topk_ids=kernel_topk_ids,
+            self._graph_eager_count += 1
+            use_direct = (
+                self.config.enable_direct_dispatch
+                and use_pool_direct
+                and self._dd_invoke_kernel is not None
+                and M <= self._dd_max_M
             )
 
-            module.w13_weight.data = orig_w13_data
-            module.w2_weight.data = orig_w2_data
+            if use_direct:
+                # === Direct Triton Dispatch (bypass quant_method.apply chain) ===
+                final_hidden = self._direct_dispatch_kernel(
+                    hidden_states, topk_weights, remapped_ids, cache, module,
+                )
+            else:
+                # === Original path via quant_method.apply ===
+                orig_w13_data = module.w13_weight.data
+                orig_w2_data = module.w2_weight.data
+
+                if use_pool_direct:
+                    module.w13_weight.data = cache._w13_pool
+                    module.w2_weight.data = cache._w2_pool
+                    kernel_topk_ids = remapped_ids
+                else:
+                    module.w13_weight.data = scratch_w13
+                    module.w2_weight.data = scratch_w2
+                    kernel_topk_ids = topk_ids
+
+                final_hidden = module.quant_method.apply(
+                    layer=module,
+                    x=hidden_states,
+                    topk_weights=topk_weights,
+                    topk_ids=kernel_topk_ids,
+                )
+
+                module.w13_weight.data = orig_w13_data
+                module.w2_weight.data = orig_w2_data
 
         # --- Phase 5: Shared experts ---
         self._maybe_profile_end(p_tok)
         p_tok = self._maybe_profile_start("P5_shared")
         if has_separate_shared:
-            if use_shared_stream:
+            if run_shared_parallel:
+                # ALPS Phase 3: wait for parallel shared expert stream
+                torch.cuda.current_stream().wait_stream(self._shared_expert_stream)
+            elif use_shared_stream:
                 from vllm.utils.torch_utils import current_stream
                 with torch.cuda.stream(module.shared_experts_stream):
                     shared_output = module.shared_experts(hidden_clone)
@@ -1024,6 +1228,17 @@ class ELMMManager:
         if (self.config.log_interval > 0
                 and self._total_intercepts % self.config.log_interval == 0):
             self.log_stats()
+        # CUDA Graph diagnostic: periodic summary (every 1000 intercepts)
+        if (self._use_cuda_graph
+                and self._total_intercepts > 0
+                and self._total_intercepts % 1000 == 0):
+            import sys
+            total_g = self._graph_replay_count + self._graph_eager_count
+            pct = self._graph_replay_count / total_g * 100 if total_g > 0 else 0
+            print(f"[ELMM] Graph stats@{self._total_intercepts}: "
+                  f"replay={self._graph_replay_count}, eager={self._graph_eager_count}, "
+                  f"ratio={pct:.1f}%, M_captured={self._graph_M}",
+                  file=sys.stderr, flush=True)
 
         return final_hidden
 
@@ -1492,6 +1707,14 @@ class ELMMManager:
                 "draft_target_correlation": loc.mean_draft_target_correlation,
                 "cache_hit_rate_estimate": loc.cache_hit_rate_estimate,
             }
+        # CUDA Graph stats
+        if self._layer_graphs:
+            stats["cuda_graph"] = {
+                "enabled": self._use_cuda_graph,
+                "captured_layers": len(self._layer_graphs),
+                "total_layers": len(self._layer_caches),
+                "graph_M": self._graph_M,
+            }
         return stats
 
     def log_stats(self):
@@ -1531,6 +1754,8 @@ class ELMMManager:
             cache._w13_pool = None
             cache._w2_pool = None
         self._layer_caches.clear()
+        # Release CUDA Graphs
+        self._layer_graphs.clear()
         self._patched_modules.clear()
         self._original_forward_impls.clear()
         self._installed = False

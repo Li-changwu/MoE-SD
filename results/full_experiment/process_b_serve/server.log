@@ -1,0 +1,11 @@
+INFO 03-19 03:56:23 [__init__.py:239] Automatically detected platform cuda.
+Traceback (most recent call last):
+  File "/root/MoE-SD/scripts/specmoe_server_v2.py", line 176, in <module>
+    asyncio.run(main())
+  File "/opt/miniconda3/envs/moe-sd/lib/python3.10/asyncio/runners.py", line 44, in run
+    return loop.run_until_complete(main)
+  File "/opt/miniconda3/envs/moe-sd/lib/python3.10/asyncio/base_events.py", line 649, in run_until_complete
+    return future.result()
+  File "/root/MoE-SD/scripts/specmoe_server_v2.py", line 110, in main
+    parser = make_arg_parser()
+TypeError: make_arg_parser() missing 1 required positional argument: 'parser'

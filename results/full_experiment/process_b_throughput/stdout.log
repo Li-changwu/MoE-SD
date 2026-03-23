@@ -1,0 +1,7 @@
+INFO 03-19 03:52:04 [__init__.py:239] Automatically detected platform cuda.
+[Harness] Loaded 50 ShareGPT prompts
+[Harness] Loading model with EAGLE-3 speculative decoding...
+INFO 03-19 03:52:12 [config.py:717] This model supports multiple tasks: {'score', 'reward', 'embed', 'generate', 'classify'}. Defaulting to 'generate'.
+INFO 03-19 03:52:12 [arg_utils.py:1669] Eagle is experimental on VLLM_USE_V1=1. Falling back to V0 Engine.
+INFO 03-19 03:52:12 [config.py:459] Overriding HF config with <function SpeculativeConfig.hf_config_override at 0x72f0396b28c0>
+INFO 03-19 03:52:12 [config.py:2968] Downcasting torch.float32 to torch.bfloat16.

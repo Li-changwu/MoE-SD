@@ -1,0 +1,23 @@
+{
+  "config_id": 3,
+  "label": "C3_specmoe_dedup",
+  "description": "+ SpecFusedMoE (expert dedup)",
+  "status": "ok",
+  "repetitions": 1,
+  "output_tps": 2.1202634621990937,
+  "mean_ttft_ms": 47462.11395680677,
+  "mean_e2e_s": 47.462334212395646,
+  "total_output_tokens": 4931.0,
+  "total_time_s": 2325.6543764073867,
+  "p50_ttft_ms": 53166.10231308732,
+  "p95_ttft_ms": 72691.44429790322,
+  "p50_e2e_s": 53.16637333203107,
+  "p95_e2e_s": 72.69167229800951,
+  "acceptance_length": 1.2087336244541484,
+  "acceptance_rate": 0.4029112081513828,
+  "spec_decode_metrics": {
+    "drafts": 2290.0,
+    "draft_tokens": 6870.0,
+    "accepted_tokens": 2768.0
+  }
+}
