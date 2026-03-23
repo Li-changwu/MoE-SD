@@ -1,0 +1,265 @@
+=== Focused Triton Config Benchmark ===
+M=4, top_k=8, E=17, warmup=200, iters=500
+W1=[17,1536,2048] W2=[17,2048,768] bf16
+
+  Testing baseline_M16_N64_K128_S2_W4... p50=305.2μs mean=305.1μs
+  Testing K256_S2_W4... p50=304.1μs mean=304.2μs
+  Testing K128_S3_W4... p50=303.1μs mean=303.6μs
+  Testing N128_K64_S3_W4... p50=322.6μs mean=323.4μs
+  Testing K128_S2_W8... p50=302.1μs mean=302.4μs
+  Testing N128_K64_S2_W8... p50=323.5μs mean=323.5μs
+  Testing K256_S2_W8... p50=303.0μs mean=303.0μs
+  Testing K64_S4_W4... p50=318.5μs mean=319.0μs
+  Testing N128_K64_S5_W4... p50=323.6μs mean=324.1μs
+  Testing K128_S4_W4... p50=303.9μs mean=303.9μs
+  Testing N128_K128_S2_W8_G8... p50=303.1μs mean=303.0μs
+  Testing M32_N64_K128_S2_W4... p50=304.1μs mean=304.5μs
+  Testing N256_K64_S2_W8... p50=323.7μs mean=324.3μs
+  Testing N128_K128_S2_W4... p50=305.2μs mean=306.0μs
+
+===========================================================================
+RESULTS (sorted by p50, baseline=305.2μs):
+Rank                                Name      p10      p50      p90     mean  vs_base
+   1                          K128_S2_W8    301.1    302.1    304.1    302.4   1.010× .
+   2                          K256_S2_W8    302.0    303.0    304.1    303.0   1.007× .
+   3                          K128_S3_W4    302.1    303.1    305.0    303.6   1.007× .
+   4                  N128_K128_S2_W8_G8    302.1    303.1    304.1    303.0   1.007× .
+   5                          K128_S4_W4    303.0    303.9    304.9    303.9   1.004× .
+   6                          K256_S2_W4    303.1    304.1    305.2    304.2   1.003× .
+   7                  M32_N64_K128_S2_W4    303.1    304.1    306.2    304.5   1.003× .
+   8         baseline_M16_N64_K128_S2_W4    303.1    305.2    307.2    305.1   1.000× .
+   9                     N128_K128_S2_W4    303.4    305.2    310.0    306.0   1.000× .
+  10                           K64_S4_W4    317.4    318.5    320.2    319.0   0.958× ✗
+  11                      N128_K64_S3_W4    321.5    322.6    324.6    323.4   0.946× ✗
+  12                      N128_K64_S2_W8    322.6    323.5    324.5    323.5   0.943× ✗
+  13                      N128_K64_S5_W4    322.6    323.6    325.5    324.1   0.943× ✗
+  14                      N256_K64_S2_W8    323.5    323.7    325.3    324.3   0.943× ✗
+
+Best: K128_S2_W8 → p50=302.1μs (HBM util=69.2%)
+{
+  "baseline_p50_us": 305.1519989967346,
+  "best": {
+    "name": "K128_S2_W8",
+    "p50_us": 302.0800054073334,
+    "config": {
+      "BLOCK_SIZE_M": 16,
+      "BLOCK_SIZE_N": 64,
+      "BLOCK_SIZE_K": 128,
+      "GROUP_SIZE_M": 1,
+      "num_warps": 8,
+      "num_stages": 2
+    }
+  },
+  "all_results": [
+    {
+      "name": "K128_S2_W8",
+      "p10": 301.05599761009216,
+      "p50": 302.0800054073334,
+      "p90": 304.1279911994934,
+      "mean": 302.3675534725189,
+      "config": {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 8,
+        "num_stages": 2
+      }
+    },
+    {
+      "name": "K256_S2_W8",
+      "p10": 302.047997713089,
+      "p50": 303.0399978160858,
+      "p90": 304.1279911994934,
+      "mean": 303.0226594209671,
+      "config": {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 256,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 8,
+        "num_stages": 2
+      }
+    },
+    {
+      "name": "K128_S3_W4",
+      "p10": 302.0800054073334,
+      "p50": 303.1040132045746,
+      "p90": 304.9600124359131,
+      "mean": 303.5667872428894,
+      "config": {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 4,
+        "num_stages": 3
+      }
+    },
+    {
+      "name": "N128_K128_S2_W8_G8",
+      "p10": 302.0800054073334,
+      "p50": 303.1040132045746,
+      "p90": 304.1279911994934,
+      "mean": 303.0403246283531,
+      "config": {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 128,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 8,
+        "num_warps": 8,
+        "num_stages": 2
+      }
+    },
+    {
+      "name": "K128_S4_W4",
+      "p10": 303.0399978160858,
+      "p50": 303.9039969444275,
+      "p90": 304.86398935317993,
+      "mean": 303.85069102048874,
+      "config": {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 4,
+        "num_stages": 4
+      }
+    },
+    {
+      "name": "K256_S2_W4",
+      "p10": 303.1040132045746,
+      "p50": 304.1279911994934,
+      "p90": 305.1519989967346,
+      "mean": 304.21843260526657,
+      "config": {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 256,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 4,
+        "num_stages": 2
+      }
+    },
+    {
+      "name": "M32_N64_K128_S2_W4",
+      "p10": 303.1040132045746,
+      "p50": 304.1279911994934,
+      "p90": 306.17600679397583,
+      "mean": 304.4527369737625,
+      "config": {
+        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 4,
+        "num_stages": 2
+      }
+    },
+    {
+      "name": "baseline_M16_N64_K128_S2_W4",
+      "p10": 303.0720055103302,
+      "p50": 305.1519989967346,
+      "p90": 307.20001459121704,
+      "mean": 305.12224239110947,
+      "config": {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 4,
+        "num_stages": 2
+      }
+    },
+    {
+      "name": "N128_K128_S2_W4",
+      "p10": 303.42400074005127,
+      "p50": 305.1519989967346,
+      "p90": 310.04801392555237,
+      "mean": 305.9930877685547,
+      "config": {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 128,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 4,
+        "num_stages": 2
+      }
+    },
+    {
+      "name": "K64_S4_W4",
+      "p10": 317.440003156662,
+      "p50": 318.4640109539032,
+      "p90": 320.22398710250854,
+      "mean": 318.99014604091644,
+      "config": {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 64,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 4,
+        "num_stages": 4
+      }
+    },
+    {
+      "name": "N128_K64_S3_W4",
+      "p10": 321.53600454330444,
+      "p50": 322.56001234054565,
+      "p90": 324.6079981327057,
+      "mean": 323.3896976709366,
+      "config": {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 128,
+        "BLOCK_SIZE_K": 64,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 4,
+        "num_stages": 3
+      }
+    },
+    {
+      "name": "N128_K64_S2_W8",
+      "p10": 322.56001234054565,
+      "p50": 323.4879970550537,
+      "p90": 324.5120048522949,
+      "mean": 323.47366535663605,
+      "config": {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 128,
+        "BLOCK_SIZE_K": 64,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 8,
+        "num_stages": 2
+      }
+    },
+    {
+      "name": "N128_K64_S5_W4",
+      "p10": 322.56001234054565,
+      "p50": 323.5839903354645,
+      "p90": 325.50400495529175,
+      "mean": 324.0587505698204,
+      "config": {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 128,
+        "BLOCK_SIZE_K": 64,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 4,
+        "num_stages": 5
+      }
+    },
+    {
+      "name": "N256_K64_S2_W8",
+      "p10": 323.5200047492981,
+      "p50": 323.743999004364,
+      "p90": 325.3439962863922,
+      "mean": 324.2501090168953,
+      "config": {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 256,
+        "BLOCK_SIZE_K": 64,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 8,
+        "num_stages": 2
+      }
+    }
+  ]
+}

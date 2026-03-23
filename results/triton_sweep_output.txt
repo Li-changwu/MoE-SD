@@ -1,0 +1,456 @@
+=== Triton FusedMoE Config Sweep ===
+Problem: M=4, top_k=8, E=17, W1=[17,1536,2048], W2=[17,2048,768] bf16
+Warmup=30, Iters=100
+Testing 162 configurations...
+
+BASELINE: W1=228.2μs W2=141.3μs Total=369.5μs
+  [10/162] M16_N64_K64_G8_W4_S3: 446.3μs (0.828×)
+  [20/162] M16_N64_K64_G16_W4_S5: 438.3μs (0.843×)
+  [30/162] M16_N64_K128_G1_W8_S4: 435.2μs (0.849×)
+  [40/162] M16_N64_K128_G16_W8_S2: 438.3μs (0.843×)
+  [50/162] M16_N128_K64_G1_W4_S3: 458.8μs (0.806×)
+  [60/162] M16_N128_K64_G8_W4_S5: 429.1μs (0.861×)
+  [70/162] M16_N128_K64_G16_W8_S3: 445.2μs (0.830×)
+  [80/162] M16_N256_K64_G1_W8_S2: 436.2μs (0.847×)
+  [90/162] M32_N64_K64_G1_W8_S3: 443.4μs (0.833×)
+  [100/162] M32_N64_K64_G8_W8_S5: 442.4μs (0.835×)
+  [110/162] M32_N64_K128_G1_W4_S3: 411.6μs (0.898×)
+  [120/162] M32_N64_K128_G8_W8_S4: 419.8μs (0.880×)
+  [130/162] M32_N64_K256_G8_W8_S2: 411.6μs (0.898×)
+  [140/162] M32_N128_K64_G8_W4_S3: 431.1μs (0.857×)
+  [150/162] M32_N128_K64_G16_W8_S4: 436.2μs (0.847×)
+  [160/162] M32_N256_K64_G8_W8_S2: 435.2μs (0.849×)
+
+================================================================================
+TOP 25 CONFIGURATIONS (baseline=369.5μs):
+Rank                                 Tag   W1(μs)   W2(μs)    Total  Speedup
+   1               M16_N64_K256_G8_W4_S2    246.8    162.8    409.6   0.902×
+   2               M16_N64_K128_G1_W4_S2    248.8    161.8    410.6   0.900×
+   3               M16_N64_K256_G1_W4_S2    247.8    162.8    410.6   0.900×
+   4               M32_N64_K128_G8_W4_S3    247.8    162.8    410.6   0.900×
+   5               M32_N64_K256_G1_W8_S2    247.8    162.8    410.6   0.900×
+   6              M32_N64_K256_G16_W8_S2    247.8    162.8    410.6   0.900×
+   7              M32_N128_K128_G8_W8_S2    247.8    162.8    410.6   0.900×
+   8              M16_N64_K128_G16_W4_S4    247.8    163.0    410.8   0.900×
+   9              M32_N128_K128_G1_W8_S2    248.7    162.8    411.5   0.898×
+  10               M16_N64_K128_G8_W4_S4    247.8    163.8    411.6   0.898×
+  11             M16_N128_K128_G16_W4_S2    248.8    162.8    411.6   0.898×
+  12               M32_N64_K128_G1_W4_S2    248.8    162.8    411.6   0.898×
+  13               M32_N64_K128_G1_W4_S3    247.8    163.8    411.6   0.898×
+  14               M32_N64_K128_G8_W4_S2    248.8    162.8    411.6   0.898×
+  15              M32_N64_K128_G16_W4_S2    248.8    162.8    411.6   0.898×
+  16              M32_N64_K128_G16_W4_S3    247.8    163.7    411.6   0.898×
+  17               M32_N64_K256_G8_W8_S2    248.8    162.8    411.6   0.898×
+  18             M32_N128_K128_G16_W8_S2    248.8    162.8    411.6   0.898×
+  19              M16_N64_K256_G16_W4_S2    248.7    163.8    412.6   0.896×
+  20               M16_N64_K128_G1_W4_S4    247.8    164.9    412.7   0.895×
+  21              M32_N64_K128_G16_W4_S4    249.7    163.8    413.5   0.894×
+  22              M16_N128_K128_G1_W4_S2    248.8    164.8    413.7   0.893×
+  23               M32_N64_K128_G1_W8_S3    249.9    163.8    413.7   0.893×
+  24               M32_N64_K256_G8_W4_S2    248.8    164.9    413.7   0.893×
+  25              M32_N64_K256_G16_W4_S2    248.8    164.9    413.7   0.893×
+{
+  "baseline": {
+    "config": {
+      "BLOCK_SIZE_M": 16,
+      "BLOCK_SIZE_N": 64,
+      "BLOCK_SIZE_K": 128,
+      "GROUP_SIZE_M": 1,
+      "num_warps": 4,
+      "num_stages": 2
+    },
+    "total_us": 369.5
+  },
+  "best": {
+    "config": {
+      "BLOCK_SIZE_M": 16,
+      "BLOCK_SIZE_N": 64,
+      "BLOCK_SIZE_K": 256,
+      "GROUP_SIZE_M": 8,
+      "num_warps": 4,
+      "num_stages": 2
+    },
+    "tag": "M16_N64_K256_G8_W4_S2",
+    "w1_us": 246.8,
+    "w2_us": 162.8,
+    "total_us": 409.6,
+    "speedup": 0.902
+  },
+  "top_configs": [
+    {
+      "config": {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 256,
+        "GROUP_SIZE_M": 8,
+        "num_warps": 4,
+        "num_stages": 2
+      },
+      "tag": "M16_N64_K256_G8_W4_S2",
+      "w1_us": 246.8,
+      "w2_us": 162.8,
+      "total_us": 409.6,
+      "speedup": 0.902
+    },
+    {
+      "config": {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 4,
+        "num_stages": 2
+      },
+      "tag": "M16_N64_K128_G1_W4_S2",
+      "w1_us": 248.8,
+      "w2_us": 161.8,
+      "total_us": 410.6,
+      "speedup": 0.9
+    },
+    {
+      "config": {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 256,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 4,
+        "num_stages": 2
+      },
+      "tag": "M16_N64_K256_G1_W4_S2",
+      "w1_us": 247.8,
+      "w2_us": 162.8,
+      "total_us": 410.6,
+      "speedup": 0.9
+    },
+    {
+      "config": {
+        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 8,
+        "num_warps": 4,
+        "num_stages": 3
+      },
+      "tag": "M32_N64_K128_G8_W4_S3",
+      "w1_us": 247.8,
+      "w2_us": 162.8,
+      "total_us": 410.6,
+      "speedup": 0.9
+    },
+    {
+      "config": {
+        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 256,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "tag": "M32_N64_K256_G1_W8_S2",
+      "w1_us": 247.8,
+      "w2_us": 162.8,
+      "total_us": 410.6,
+      "speedup": 0.9
+    },
+    {
+      "config": {
+        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 256,
+        "GROUP_SIZE_M": 16,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "tag": "M32_N64_K256_G16_W8_S2",
+      "w1_us": 247.8,
+      "w2_us": 162.8,
+      "total_us": 410.6,
+      "speedup": 0.9
+    },
+    {
+      "config": {
+        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_N": 128,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 8,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "tag": "M32_N128_K128_G8_W8_S2",
+      "w1_us": 247.8,
+      "w2_us": 162.8,
+      "total_us": 410.6,
+      "speedup": 0.9
+    },
+    {
+      "config": {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 16,
+        "num_warps": 4,
+        "num_stages": 4
+      },
+      "tag": "M16_N64_K128_G16_W4_S4",
+      "w1_us": 247.8,
+      "w2_us": 163.0,
+      "total_us": 410.8,
+      "speedup": 0.9
+    },
+    {
+      "config": {
+        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_N": 128,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "tag": "M32_N128_K128_G1_W8_S2",
+      "w1_us": 248.7,
+      "w2_us": 162.8,
+      "total_us": 411.5,
+      "speedup": 0.898
+    },
+    {
+      "config": {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 8,
+        "num_warps": 4,
+        "num_stages": 4
+      },
+      "tag": "M16_N64_K128_G8_W4_S4",
+      "w1_us": 247.8,
+      "w2_us": 163.8,
+      "total_us": 411.6,
+      "speedup": 0.898
+    },
+    {
+      "config": {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 128,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 16,
+        "num_warps": 4,
+        "num_stages": 2
+      },
+      "tag": "M16_N128_K128_G16_W4_S2",
+      "w1_us": 248.8,
+      "w2_us": 162.8,
+      "total_us": 411.6,
+      "speedup": 0.898
+    },
+    {
+      "config": {
+        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 4,
+        "num_stages": 2
+      },
+      "tag": "M32_N64_K128_G1_W4_S2",
+      "w1_us": 248.8,
+      "w2_us": 162.8,
+      "total_us": 411.6,
+      "speedup": 0.898
+    },
+    {
+      "config": {
+        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 4,
+        "num_stages": 3
+      },
+      "tag": "M32_N64_K128_G1_W4_S3",
+      "w1_us": 247.8,
+      "w2_us": 163.8,
+      "total_us": 411.6,
+      "speedup": 0.898
+    },
+    {
+      "config": {
+        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 8,
+        "num_warps": 4,
+        "num_stages": 2
+      },
+      "tag": "M32_N64_K128_G8_W4_S2",
+      "w1_us": 248.8,
+      "w2_us": 162.8,
+      "total_us": 411.6,
+      "speedup": 0.898
+    },
+    {
+      "config": {
+        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 16,
+        "num_warps": 4,
+        "num_stages": 2
+      },
+      "tag": "M32_N64_K128_G16_W4_S2",
+      "w1_us": 248.8,
+      "w2_us": 162.8,
+      "total_us": 411.6,
+      "speedup": 0.898
+    },
+    {
+      "config": {
+        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 16,
+        "num_warps": 4,
+        "num_stages": 3
+      },
+      "tag": "M32_N64_K128_G16_W4_S3",
+      "w1_us": 247.8,
+      "w2_us": 163.7,
+      "total_us": 411.6,
+      "speedup": 0.898
+    },
+    {
+      "config": {
+        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 256,
+        "GROUP_SIZE_M": 8,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "tag": "M32_N64_K256_G8_W8_S2",
+      "w1_us": 248.8,
+      "w2_us": 162.8,
+      "total_us": 411.6,
+      "speedup": 0.898
+    },
+    {
+      "config": {
+        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_N": 128,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 16,
+        "num_warps": 8,
+        "num_stages": 2
+      },
+      "tag": "M32_N128_K128_G16_W8_S2",
+      "w1_us": 248.8,
+      "w2_us": 162.8,
+      "total_us": 411.6,
+      "speedup": 0.898
+    },
+    {
+      "config": {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 256,
+        "GROUP_SIZE_M": 16,
+        "num_warps": 4,
+        "num_stages": 2
+      },
+      "tag": "M16_N64_K256_G16_W4_S2",
+      "w1_us": 248.7,
+      "w2_us": 163.8,
+      "total_us": 412.6,
+      "speedup": 0.896
+    },
+    {
+      "config": {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 4,
+        "num_stages": 4
+      },
+      "tag": "M16_N64_K128_G1_W4_S4",
+      "w1_us": 247.8,
+      "w2_us": 164.9,
+      "total_us": 412.7,
+      "speedup": 0.895
+    },
+    {
+      "config": {
+        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 16,
+        "num_warps": 4,
+        "num_stages": 4
+      },
+      "tag": "M32_N64_K128_G16_W4_S4",
+      "w1_us": 249.7,
+      "w2_us": 163.8,
+      "total_us": 413.5,
+      "speedup": 0.894
+    },
+    {
+      "config": {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 128,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 4,
+        "num_stages": 2
+      },
+      "tag": "M16_N128_K128_G1_W4_S2",
+      "w1_us": 248.8,
+      "w2_us": 164.8,
+      "total_us": 413.7,
+      "speedup": 0.893
+    },
+    {
+      "config": {
+        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 8,
+        "num_stages": 3
+      },
+      "tag": "M32_N64_K128_G1_W8_S3",
+      "w1_us": 249.9,
+      "w2_us": 163.8,
+      "total_us": 413.7,
+      "speedup": 0.893
+    },
+    {
+      "config": {
+        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 256,
+        "GROUP_SIZE_M": 8,
+        "num_warps": 4,
+        "num_stages": 2
+      },
+      "tag": "M32_N64_K256_G8_W4_S2",
+      "w1_us": 248.8,
+      "w2_us": 164.9,
+      "total_us": 413.7,
+      "speedup": 0.893
+    },
+    {
+      "config": {
+        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 256,
+        "GROUP_SIZE_M": 16,
+        "num_warps": 4,
+        "num_stages": 2
+      },
+      "tag": "M32_N64_K256_G16_W4_S2",
+      "w1_us": 248.8,
+      "w2_us": 164.9,
+      "total_us": 413.7,
+      "speedup": 0.893
+    }
+  ]
+}

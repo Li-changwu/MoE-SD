@@ -1,0 +1,8 @@
+{"prompt_idx": 0, "completion_tokens": 128, "elapsed_s": 11.892, "tps": 10.764}
+{"prompt_idx": 1, "completion_tokens": 128, "elapsed_s": 11.927, "tps": 10.732}
+{"prompt_idx": 2, "completion_tokens": 128, "elapsed_s": 6.118, "tps": 20.922}
+{"prompt_idx": 3, "completion_tokens": 128, "elapsed_s": 7.657, "tps": 16.716}
+{"prompt_idx": 4, "completion_tokens": 128, "elapsed_s": 7.652, "tps": 16.727}
+{"prompt_idx": 5, "completion_tokens": 128, "elapsed_s": 6.487, "tps": 19.733}
+{"prompt_idx": 6, "completion_tokens": 128, "elapsed_s": 6.171, "tps": 20.744}
+{"prompt_idx": 7, "completion_tokens": 128, "elapsed_s": 6.148, "tps": 20.819}

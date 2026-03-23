@@ -144,3 +144,5 @@
 (APIServer pid=157644) INFO 03-23 07:18:50 [loggers.py:259] Engine 000: Avg prompt throughput: 1.8 tokens/s, Avg generation throughput: 16.3 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
 (APIServer pid=157644) INFO 03-23 07:18:50 [metrics.py:100] SpecDecoding metrics: Mean acceptance length: 3.42, Accepted throughput: 11.60 tokens/s, Drafted throughput: 14.40 tokens/s, Accepted: 116 tokens, Drafted: 144 tokens, Per-position acceptance rate: 0.875, 0.771, 0.771, Avg Draft acceptance rate: 80.6%
 (APIServer pid=157644) INFO 03-23 07:19:00 [loggers.py:259] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+(APIServer pid=157644) INFO 03-23 07:56:09 [launcher.py:122] Shutting down FastAPI HTTP server.
+[rank0]:[W323 07:56:09.593945341 ProcessGroupNCCL.cpp:1524] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())

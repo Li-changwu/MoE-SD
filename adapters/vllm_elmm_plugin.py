@@ -30,6 +30,18 @@ def register():
     import sys
     print(f"[ELMM] register() called in PID={os.getpid()}", file=sys.stderr, flush=True)
 
+    # Point vLLM's FusedMoE config lookup at our A6000-tuned tile configs
+    # (must be set before any model loading triggers get_moe_configs()).
+    if "VLLM_TUNED_CONFIG_FOLDER" not in os.environ:
+        _tuned_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "configs", "vllm_tuned_a6000",
+        )
+        if os.path.isdir(_tuned_dir):
+            os.environ["VLLM_TUNED_CONFIG_FOLDER"] = _tuned_dir
+            print(f"[ELMM] VLLM_TUNED_CONFIG_FOLDER={_tuned_dir}",
+                  file=sys.stderr, flush=True)
+
     try:
         from vllm.v1.worker.gpu_worker import Worker
     except ImportError as e:

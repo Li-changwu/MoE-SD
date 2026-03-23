@@ -1,0 +1,5 @@
+{"prompt_idx": 0, "completion_tokens": 128, "elapsed_s": 9.421, "tps": 13.587}
+{"prompt_idx": 1, "completion_tokens": 128, "elapsed_s": 6.677, "tps": 19.172}
+{"prompt_idx": 2, "error": "('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))"}
+{"prompt_idx": 3, "error": "HTTPConnectionPool(host='127.0.0.1', port=8000): Max retries exceeded with url: /v1/chat/completions (Caused by NewConnectionError(\"HTTPConnection(host='127.0.0.1', port=8000): Failed to establish a new connection: [Errno 111] Connection refused\"))"}
+{"prompt_idx": 4, "error": "HTTPConnectionPool(host='127.0.0.1', port=8000): Max retries exceeded with url: /v1/chat/completions (Caused by NewConnectionError(\"HTTPConnection(host='127.0.0.1', port=8000): Failed to establish a new connection: [Errno 111] Connection refused\"))"}

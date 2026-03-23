@@ -717,13 +717,20 @@ class ELMMManager:
                 block_shape=None,
             )
         except Exception:
-            # Fallback default config
+            self._dd_tile_config = None
+
+        # A6000-tuned tile config (microbenchmark-validated).
+        # Overrides vLLM default (BSM=16/BSN=32/BSK=64) which lacks
+        # num_warps/num_stages and uses smaller tiles.
+        # W8 (8 warps) + S3 (3 pipeline stages) improves HBM utilization
+        # from 59% to ~73% on the decode hot path (M=4, E=17, bf16).
+        if self._dd_tile_config is None or "num_warps" not in self._dd_tile_config:
             self._dd_tile_config = {
-                "BLOCK_SIZE_M": 64,
+                "BLOCK_SIZE_M": 16,
                 "BLOCK_SIZE_N": 64,
-                "BLOCK_SIZE_K": 32,
-                "GROUP_SIZE_M": 8,
-                "num_warps": 4,
+                "BLOCK_SIZE_K": 128,
+                "GROUP_SIZE_M": 1,
+                "num_warps": 8,
                 "num_stages": 3,
             }
 

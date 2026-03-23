@@ -1,0 +1,7 @@
+{
+  "total_tokens": 256,
+  "total_time_s": 16.098,
+  "avg_tps": 15.903,
+  "num_requests": 2,
+  "errors": 3
+}
