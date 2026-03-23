@@ -845,20 +845,15 @@ class ELMMManager:
         if next_remap is None:
             return
 
-        # Find experts that are routable but not yet cached.
-        # During warmup, many remap entries are 0 (unmapped).
-        # We prefetch experts that are currently in next_cache._slot_map
-        # is incomplete.
-        # Strategy: load the experts that Layer N just used (inter-layer
-        # correlation: Jaccard ~33%), prioritising those not in next cache.
-        # This is cheap — just iterate the slot_map.
         cached_eids = set(next_cache._slot_map.keys())
         if len(cached_eids) >= next_cache._max_slots:
             self._oracle_prefetch_skipped += 1
             return
 
         # Use current layer's cached experts as prediction for next layer.
-        # Rationale: adjacent MoE layers tend to activate overlapping experts.
+        # Rationale: adjacent MoE layers tend to activate overlapping experts
+        # (inter-layer Jaccard ~33%).  Cache slot_map provides broader coverage
+        # than per-step routing, and avoids GPU→CPU sync for topk_ids.
         cur_cache = self._layer_caches[layer_name]
         predicted_eids = set(cur_cache._slot_map.keys())
 
@@ -1080,6 +1075,13 @@ class ELMMManager:
         # --- Phase 3: Cache lookup + scratchpad fill ---
         self._maybe_profile_end(p_tok)
         p_tok = self._maybe_profile_start("P3_cache")
+
+        # Sync any in-flight Oracle prefetch copies before accessing cache.
+        # Oracle launches async H2D on _prefetch_stream; without this wait,
+        # Phase 3 could see a slot as "cached" while data is still copying.
+        if (self.config.enable_oracle_prefetch
+                and self._prefetch_stream is not None):
+            torch.cuda.current_stream().wait_stream(self._prefetch_stream)
 
         use_pool_direct = (
             self.config.enable_pool_direct and self._remap_table is not None

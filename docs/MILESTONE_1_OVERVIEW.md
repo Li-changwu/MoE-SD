@@ -2623,9 +2623,69 @@ Oracle 的 dict 查找开销 ~500 ns × 26 层 = ~13 μs/step 可忽略）。
 代码路径在 stale path 下无开销（early return），在 validation/warmup 场景
 下提供有意义的吞吐改善。
 
-### 15.5 综合评估与下一步
+### 15.5 Phase 4：Prefill 级联预热
 
-#### 15.5.1 当前性能状态
+#### 15.5.1 设计分析
+
+Phase 4 原始设计目标是在 prefill 阶段利用跨层级联预取来减少 TTFT。
+分析后发现 **Oracle 预取（Phase 2）已天然提供级联效果**：
+
+- Oracle 在每层的 Phase 4（MoE kernel）启动时，异步预取下一层的专家
+- prefill 期间（M > 8），Oracle 的 cache-based 预测利用 `slot_map` 中已缓存
+  的专家作为下一层预测，逐层传播
+- 首次 prefill 时每层都有 cache miss，Oracle 的级联加载将串行等待变为异步
+
+#### 15.5.2 Routing-Based 增强实验
+
+尝试在 prefill 场景下使用 **实际路由结果（topk_ids）** 替代 cache-based 预测：
+
+```python
+# 增强版：prefill 用路由结果，decode 用缓存
+if M > 8:
+    predicted_eids = set(topk_ids.reshape(-1).tolist())
+else:
+    predicted_eids = set(cur_cache._slot_map.keys())
+```
+
+**A/B 测试结果：**
+
+| 配置 | tok/s | 相对 Oracle-only |
+|-----|-------|-----------------|
+| Oracle cache-based | 16.85 | baseline |
+| Oracle + routing-based cascade | 15.85 | **−5.9%** |
+
+**回退原因分析：**
+
+1. **GPU→CPU 同步开销**：`topk_ids.reshape(-1).tolist()` 触发 GPU→CPU sync，
+   在 Phase 4 关键路径上增加延迟
+2. **预测集过大**：M=128 时 `set(topk_ids.reshape(-1).tolist())` 产生
+   ~80-100 个唯一专家，但 cache 仅 17 slots，实际预取量不变
+3. **Cache-based 预测已足够准确**：TASER remap 稳定后，相邻层的专家亲和性
+   已被 slot_map 充分捕获
+
+**决策：回退 routing-based 增强，保留 cache-based Oracle 预取。**
+
+#### 15.5.3 Race Condition 修复
+
+实施过程中发现并修复了一个竞态条件：
+
+- Oracle 在 `_prefetch_stream` 上分配 cache slot 并启动异步 H2D 拷贝
+- 下一层的 Phase 3 在默认 stream 上检查 `slot_map` 时，可能看到已分配但
+  **尚未完成拷贝** 的 slot，导致使用未初始化的权重数据
+
+修复方案：在 Phase 3 cache 访问前添加 stream 同步：
+
+```python
+# Phase 3 开始前，确保 Oracle 预取完成
+torch.cuda.current_stream().wait_stream(self._prefetch_stream)
+```
+
+这是正确性修复（非性能优化），在 stale path 下 `wait_stream` 开销可忽略
+（prefetch stream 无活跃操作时立即返回）。
+
+### 15.6 综合评估与下一步
+
+#### 15.6.1 当前性能状态
 
 | 优化阶段 | tok/s | 相对 v1 | 增量 |
 |---------|-------|---------|------|
@@ -2639,7 +2699,7 @@ Oracle 的 dict 查找开销 ~500 ns × 26 层 = ~13 μs/step 可忽略）。
 > **注**：Oracle 的 +9.1% 基于 GPU cache OFF 的 matched baseline（15.45 tok/s）。
 > 在 TASER validation/warmup 过渡期，Oracle 预取有效减少了 PCIe 同步等待。
 
-#### 15.5.2 瓶颈再分析
+#### 15.6.2 瓶颈再分析
 
 ALPS 实施揭示了一个关键事实：
 
@@ -2660,13 +2720,13 @@ Oracle 预取的成功（+9.1%）说明**减少 PCIe 同步等待**（而非 ker
 3. **减少总步骤数**：更高的 speculative decode 接受率（需要更好的 draft 模型）
 4. **隐藏 PCIe 延迟**：Oracle 预取（已实现）+ Prefill 级联
 
-#### 15.5.3 后续实施计划
+#### 15.6.3 后续实施计划
 
 基于上述分析，调整剩余 ALPS 优化的优先级：
 
 1. ✅ **CUDA Graph（Phase 1）**：已实现，-32.4% 回退，禁用
 2. ✅ **Oracle 预取（Phase 2）**：已实现，+9.1%，保留启用
 3. ✅ **SharedExpert 并行（Phase 3）**：已实现，中性，保留启用
-4. **Prefill 级联预热（Phase 4）**：TTFT 优化的核心
+4. ✅ **Prefill 级联预热（Phase 4）**：Oracle 已覆盖，routing 增强 -5.9% 回退，回退
 5. **INT8 量化复活**：重新评估 W8A16 INT8 对 HBM 读取量的直接影响
 6. **Triton 配置调优**：寻找更优的 tile config 来提升 HBM 利用率
