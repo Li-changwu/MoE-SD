@@ -1839,3 +1839,566 @@ $$14.63 \times 1.12 \times 1.04 \times 1.20 \approx 20.4 \text{ tok/s} \quad (2.
 > 4. **"量化是正交优化，不是算子调度的替代"**——INT8 可以减半 HBM 读取量，
 >    但不能减少 kernel launch 次数或隐藏 CPU-GPU 同步延迟；
 >    两者应该叠加使用而非二选一
+
+---
+
+## 十四、ALPS：Adaptive Layer-Pipelined Scheduling
+
+> **提案**：提出 ALPS（Adaptive Layer-Pipelined Scheduling）—— 一个统一的
+> 算子调度框架，利用 TASER remap 表作为**零成本跨层专家 oracle**，实现
+> 确定性跨层流水线化，同时优化 **decode 吞吐** 和 **prefill TTFT**。
+
+### 14.1 动机：三维资源浪费
+
+TASER 将 decode 关键路径压缩到 Phase 4（MoE kernel，0.353 ms/层），
+但同时暴露了一个系统级问题——**三维硬件资源浪费**：
+
+```
+当前 decode 执行（26 层 MoE，每步 ~9.5 ms）：
+
+GPU HBM BW:   [████████████████████████████] 97% 已饱和（MoE 读 pool 权重）
+GPU Compute:  [██░░░░░░░░░░░░░░░░░░░░░░░░░] ~8% 利用（AI=4.0, 远低于脊点）
+PCIe BW:      [░░░░░░░░░░░░░░░░░░░░░░░░░░░] ~0% 空闲（TASER 跳过 H2D 拷贝）
+CPU:          [░░░░░░░░░░░░░░░░░░░░░░░░░░░] ~0% 空闲（TASER 跳过 dict lookup）
+```
+
+**GPU compute、PCIe 带宽、CPU 在 97% 的时间里完全空闲。**
+
+对于 prefill（首请求冷缓存），问题更严重：
+
+```
+Prefill 执行（128 tokens，26 层 MoE，首请求）：
+
+GPU HBM BW:   [██████████░░░░░░░░░░░░░░░░░] ~35%（等 PCIe 传输）
+GPU Compute:  [████████████████░░░░░░░░░░░] ~60%（M=128 时 compute 更重）
+PCIe BW:      [████████████████████████████] 100% 满载（冷缓存→大量 H2D）
+CPU:          [██░░░░░░░░░░░░░░░░░░░░░░░░░] ~8%（cache 管理）
+```
+
+MoE-Lightning 和 KTransformers 各自解决了部分资源浪费问题，
+但没有系统地利用 **TASER 提供的跨层专家 oracle**。
+
+### 14.2 核心创新：TASER Oracle Pipeline
+
+#### 14.2.1 关键观察
+
+TASER 的 stale remap 表具有一个独特属性：
+
+> **每层的 `_layer_remap[layer_name]` 在 stale path（99.2% 的步骤）中
+> 是一个完全冻结的 GPU 张量，精确记录了该层所有 expert→pool_slot 的映射。**
+
+这意味着在 Layer N 执行时，我们**无需任何额外计算**就已经知道：
+- Layer N+1 的池槽位布局是什么
+- Layer N+1 的哪些 expert 在缓存中
+- Layer N+1 是否需要任何 H2D 传输
+
+**这是一个零成本 oracle。** 对比：
+
+| 系统 | "下一层需要什么 expert" 的获取方式 | 成本 | 准确率 |
+|------|----------------------------------|------|--------|
+| MoE-Infinity | 训练的激活预测器 | 推理成本 | ~85% |
+| Pre-gated MoE | 额外的浅层 gate 网络 | forward 成本 | ~90% |
+| MoE-Lightning | 无预测（按需调度） | — | — |
+| KTransformers | 频率统计 → hot/cold 分类 | 统计成本 | ~80% |
+| **ALPS (ours)** | **直接读取 TASER remap 表** | **零** | **>99%** |
+
+这是 ALPS 的核心差异化：**确定性而非概率性的跨层流水线化**。
+
+#### 14.2.2 Oracle 的性质
+
+设 $R_n$ 为 Layer $n$ 的 remap 表（`_layer_remap[layer_n]`），
+$E_n^{stale}$ 为 stale path 下 Layer $n$ 的有效 expert 集合：
+
+$$E_n^{stale} = \{e \mid R_n[e] \neq 0 \text{ or } e \text{ is default slot 0}\}$$
+
+在 stale path 中（步骤 $t$, $t \neq t_{validate}$）：
+
+1. **冻结性**：$R_n^{(t)} = R_n^{(t-1)}$（remap 表不更新）
+2. **完整性**：$R_n$ 覆盖了该层所有可能被路由到的 expert
+3. **一致性**：$R_n$ 与 cache 池中的实际权重位置完全对应
+
+因此，在步骤 $t$ 执行 Layer $n$ 时，**Layer $n+1, n+2, ..., n+25$
+的 remap 表都已可读且有效**。这为跨层流水线化提供了理论基础。
+
+### 14.3 ALPS 三阶段架构
+
+ALPS 将每层的 MoE forward 从单流串行重构为三流协同：
+
+```
+┌─────────────────────────── Layer N 时间窗口 ───────────────────────────┐
+│                                                                         │
+│ Stream 0 (Main):   [Attn_N]→[Route_N]→[TASER_N]→[MoE_N ═══════════]   │
+│                                                    0.353 ms HBM-bound   │
+│                                                    ↓ event signal        │
+│ Stream 1 (Oracle): ─────────────────────── [Prefetch_{N+1}] ─────────  │
+│                                             read R_{N+1}, check cache   │
+│                                             async H2D if miss predicted │
+│                                             ↑ uses PCIe, not HBM ↑      │
+│                                                                         │
+│ Stream 2 (Shared): ─────────────────────── [SharedExpert_N] ─────────  │
+│                                             independent of RoutedMoE    │
+│                                             ↑ uses GPU compute ↑        │
+│                                                                         │
+│ CPU Thread:        ─────────────────────── [Validate R_{N+2}] ───────  │
+│                                             compare with R_{N+1}        │
+│                                             predict misses 2 layers     │
+│                                             ahead                       │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+**四个并行操作利用四种不同的硬件资源：**
+
+| 操作 | 硬件资源 | 与 MoE kernel 冲突？ |
+|------|---------|-------------------|
+| MoE_N kernel | GPU HBM 带宽 | — （主操作） |
+| Prefetch_{N+1} H2D | PCIe 带宽 | ✗ 不冲突 |
+| SharedExpert_N | GPU Compute (SM) | ⚠ 轻微 SM 竞争 |
+| Validate R_{N+2} | CPU 计算 | ✗ 不冲突 |
+
+### 14.4 组件 I：跨层 Oracle 预取（Decode + Prefill 通用）
+
+#### 14.4.1 Decode 模式
+
+在 TASER stale path 中，Layer N+1 的 remap 表已冻结：
+
+```python
+def _oracle_prefetch(self, current_layer_idx: int):
+    """During Layer N's MoE, prefetch for Layer N+1."""
+    next_layer = self._ordered_layers[current_layer_idx + 1]
+    next_remap = self._layer_remap[next_layer]   # frozen tensor
+    next_cache = self._layer_caches[next_layer]
+
+    # 确定 next_layer 哪些 expert 在缓存中
+    # remap 表非零项 = 缓存的 expert
+    cached_slots = next_remap.nonzero(as_tuple=True)[0]
+    all_experts_cached = (cached_slots.numel() >= next_cache._max_slots)
+
+    if all_experts_cached:
+        return  # 无 miss，无需预取
+
+    # 预测可能的 miss：next_remap 中值为 0 但可能被路由到的 expert
+    # 使用当前层的 topk_ids 估计下一层的热门 expert（inter-layer 相关性）
+    predicted_misses = self._predict_next_layer_misses(
+        current_layer_idx, next_remap, next_cache
+    )
+
+    if predicted_misses:
+        with torch.cuda.stream(self._prefetch_stream):
+            for eid in predicted_misses:
+                slot = next_cache.alloc_slot(eid)
+                pool_w13, pool_w2 = next_cache.get_slot_tensors(slot)
+                pool_w13.copy_(w13_ref[eid], non_blocking=True)
+                pool_w2.copy_(w2_ref[eid], non_blocking=True)
+```
+
+**关键**：上述预取运行在 `_prefetch_stream` 上，与 Stream 0 上的
+MoE kernel 完全并行。MoE kernel 读 HBM，预取写 PCIe→HBM，
+两者使用的硬件通道不同（HBM controller vs PCIe controller），因此不互斥。
+
+**RTFA（Run-Time Feasibility Analysis）**：
+
+- MoE kernel 时间窗口：0.353 ms/层
+- PCIe Gen4 x16 带宽：~25 GB/s
+- 可预取数据量：0.353ms × 25 GB/s = **8.83 MB**
+- 单 expert 大小：9.44 MB
+- → 可完全预取 **~0.94 个 expert**（几乎 1 个 expert）
+- Decode 场景 miss 率 < 1% → **平均不到 1 个 miss/step** → 完全覆盖！
+
+#### 14.4.2 Prefill 模式（TTFT 优化核心）
+
+Prefill 时缓存冷启动，miss 率远高于 decode。ALPS 采用**级联预热**策略：
+
+```
+首请求 Prefill（128 tokens，26 层 MoE）：
+
+Layer 0:   [Route_0] → [Load ~20 experts] → [MoE_0(M=128)]
+                                              ↓ 同时
+                           PCIe Stream: [预取 Layer 1 的 top-k 高频 expert]
+
+Layer 1:   [Route_1] → [Load ~10 experts*] → [MoE_1(M=128)]
+                         ↑ 只需加载未被预取到的 expert
+                                              ↓ 同时
+                           PCIe Stream: [预取 Layer 2 的 top-k 高频 expert]
+
+Layer 2:   [Route_2] → [Load ~8 experts*] → [MoE_2(M=128)]
+                         ↑ 更少 miss（级联效应）
+                   ...
+
+（*miss 数逐层递减，因为级联预热的覆盖率逐层提高）
+```
+
+**级联预热的 expert 预测策略**：
+
+1. **层内传递**：Layer N 的 routing 结果直接作为 Layer N+1 的预测
+   （相邻层 expert 激活的 Jaccard 相似度 ~33%）
+
+2. **频率先验**：离线统计每层的 expert 激活频率分布，
+   优先预取 top-k 高频 expert（覆盖 ~50% 的激活）
+
+3. **联合预测**：$P(\text{expert}_j \text{ at } L_{n+1} | \text{routing}_n)$
+   可以通过在线统计快速收敛
+
+**TTFT 量化分析**：
+
+对于首请求（完全冷缓存），假设 M=128 tokens, top_k=8：
+
+| 指标 | 无 ALPS | 有 ALPS | 改善 |
+|------|--------|---------|------|
+| 每层平均 miss 数（首请求） | ~20 experts | ~12 experts | -40% |
+| 每层 PCIe 等待时间 | 20 × 0.38 = 7.6 ms | 12 × 0.38 = 4.6 ms | -39% |
+| MoE kernel 时间 (M=128) | ~2.5 ms | ~2.5 ms | 不变 |
+| 每层总时间 | ~10.1 ms | ~7.1 ms | -30% |
+| 26 层 MoE 总时间 | ~263 ms | ~185 ms | -30% |
+| attention + 非 MoE 层 | ~50 ms | ~50 ms | 不变 |
+| **估算 TTFT** | **~313 ms** | **~235 ms** | **-25%** |
+
+> **注**：上述估算假设后续请求缓存已暖（warmup），实际 TTFT 改善集中在
+> 首请求上。后续请求因缓存命中率高，TTFT 主要由 attention 和 MoE compute 决定。
+
+### 14.5 组件 II：TASER Fast Path CUDA Graph 捕获
+
+#### 14.5.1 设计
+
+TASER fast path 的每层 kernel 序列是**完全确定性的**：
+
+```
+输入: hidden_states[M, K], topk_ids[M, top_k], topk_weights[M, top_k]
+      (shape 固定: M=4, K=2048, top_k=8)
+
+kernel 1: remapped_ids = remap_table[topk_ids]         # index_select
+kernel 2: sorted_ids, expert_ids, ntp = align(...)      # moe_align_block_size
+kernel 3: W1 = triton_moe_kernel(hidden, w13_pool)      # Triton GEMM
+kernel 4: act = silu_and_mul(W1)                         # CUDA activation
+kernel 5: W2 = triton_moe_kernel(act, w2_pool)           # Triton GEMM
+kernel 6: output = W2.sum(dim=1)                          # reduction
+
+输出: output[M, K]
+```
+
+所有 kernel 的 shape、pool 指针、config 在 stale path 中不变。
+唯一变化的是 `hidden_states`、`topk_ids`、`topk_weights` 的**值**。
+
+#### 14.5.2 CUDA Graph Capture 策略
+
+```python
+class _LayerCUDAGraph:
+    """Per-layer CUDA Graph for TASER stale path."""
+
+    def __init__(self, M: int, top_k: int, hidden_dim: int, device):
+        # Static-shape placeholder tensors (CUDA Graph inputs)
+        self.ph_hidden = torch.zeros(M, hidden_dim, device=device, dtype=torch.bfloat16)
+        self.ph_topk_ids = torch.zeros(M, top_k, device=device, dtype=torch.long)
+        self.ph_topk_weights = torch.zeros(M, top_k, device=device, dtype=torch.bfloat16)
+        self.graph = None
+        self.output = None  # captured output tensor
+
+    def capture(self, forward_fn):
+        """Capture the TASER fast path as a CUDA Graph."""
+        # Warm-up run (required by CUDA Graph API)
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            self.output = forward_fn(self.ph_hidden, self.ph_topk_ids, self.ph_topk_weights)
+        torch.cuda.current_stream().wait_stream(s)
+
+        # Capture
+        self.graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self.graph, stream=s):
+            self.output = forward_fn(self.ph_hidden, self.ph_topk_ids, self.ph_topk_weights)
+
+    def replay(self, hidden_states, topk_ids, topk_weights):
+        """Replay with new input values (must match shapes)."""
+        self.ph_hidden.copy_(hidden_states)
+        self.ph_topk_ids.copy_(topk_ids)
+        self.ph_topk_weights.copy_(topk_weights)
+        self.graph.replay()
+        return self.output
+```
+
+#### 14.5.3 Graph replay 与 Eager fallback 的切换
+
+```python
+# In _elmm_forward_impl, Phase 4:
+if self._use_cuda_graph and stale_remap_ok and M == self._graph_M:
+    # CUDA Graph fast path (99.2% of steps)
+    final_hidden = self._layer_graphs[layer_name].replay(
+        hidden_states, topk_weights, remapped_ids
+    )
+else:
+    # Eager fallback (validation steps + dynamic batch sizes)
+    final_hidden = self._direct_dispatch_kernel(
+        hidden_states, topk_weights, remapped_ids, cache, module
+    )
+```
+
+**中间 tensor 生命周期管理**：
+
+| 张量 | capture 时 | replay 时 | 说明 |
+|------|-----------|-----------|------|
+| `ph_hidden` | warm-up 值 | `copy_(hidden_states)` | 输入 |
+| `ph_topk_ids` | warm-up 值 | `copy_(topk_ids)` | 输入 |
+| `ph_topk_weights` | warm-up 值 | `copy_(topk_weights)` | 输入 |
+| `_dd_inter_w1` | 预分配 | 复用（Graph 内部写） | 中间 |
+| `_dd_inter_act` | 预分配 | 复用 | 中间 |
+| `_dd_inter_w2` | 预分配 | 复用 | 中间 |
+| `w13_pool`, `w2_pool` | 指向 cache pool | 不变（stale path） | 权重 |
+| `output` | captured | 读取返回值 | 输出 |
+
+所有中间 tensor 均已预分配（Direct Dispatch 的 `_dd_inter_*`），
+pool 指针在 stale path 中不变，满足 CUDA Graph 的静态地址要求。
+
+#### 14.5.4 收益分析
+
+| 指标 | 当前 (Eager) | CUDA Graph | 改善 |
+|------|-------------|-----------|------|
+| kernel launch 次数/步 | 156 (6 × 26) | 26 (graph replay) | -83% |
+| launch 开销/步 | ~1.17 ms | ~0.05 ms | -96% |
+| MoE 总时间/步 | ~9.5 ms | ~8.4 ms | -12% |
+| Decode 吞吐 | 14.63 tok/s | ~16.4 tok/s | +12% |
+
+### 14.6 组件 III：SharedExpert-RoutedMoE 并行化
+
+#### 14.6.1 当前问题
+
+在 ELMM 的 `_elmm_forward_impl` 中，SharedExpert 有两种执行路径：
+
+1. **非 stream 路径**（当前默认）：SharedExpert 在 Phase 1 就执行完毕，
+   **早于 MoE kernel**，不与 Phase 4 重叠
+2. **stream 路径**：SharedExpert 在 Phase 5 启动，**晚于 MoE kernel**，
+   也不与 Phase 4 重叠
+
+两种路径都没有实现 SharedExpert 与 RoutedMoE 的并行化。
+
+#### 14.6.2 ALPS 重构
+
+将 SharedExpert 移动到与 MoE kernel **同时启动**：
+
+```python
+# --- Phase 4 改造 ---
+# 在 MoE kernel 启动前，先 fork shared expert 到独立 stream
+if has_separate_shared:
+    shared_input = module._get_shared_experts_input(hidden_states)
+    with torch.cuda.stream(self._shared_stream):
+        shared_output = module.shared_experts(shared_input)
+
+# 然后在 main stream 上执行 MoE kernel（HBM-bound）
+if self._use_cuda_graph and stale_remap_ok:
+    final_hidden = self._layer_graphs[layer_name].replay(...)
+else:
+    final_hidden = self._direct_dispatch_kernel(...)
+
+# MoE kernel 完成后，等待 shared expert（大概率已完成）
+if has_separate_shared:
+    torch.cuda.current_stream().wait_stream(self._shared_stream)
+    final_hidden = (shared_output, final_hidden)
+```
+
+**并行时序**：
+
+```
+Stream 0 (Main):   [Route]→[TASER]→[MoE Kernel ════════════════] 0.353ms
+                                     ↑ MoE 启动同时
+Stream 2 (Shared): ─────────────── [SharedExpert] 0.035ms
+                                                   ↑ 远在 MoE 完成前结束
+```
+
+**收益估算**：
+- SharedExpert 权重 HBM 读取：~25 MB
+- 与 MoE 的 160 MB HBM 读取存在轻微带宽竞争
+- 保守估计：SharedExpert 的 0.035ms 有 70% 被 MoE 时间窗口隐藏
+- 净节省：0.035 × 0.7 × 26 = **~0.64 ms/step ≈ +7%**
+
+### 14.7 组件 IV：Prefill Expert 流水线（TTFT 专项优化）
+
+#### 14.7.1 当前 Prefill 瓶颈
+
+Prefill 时 M=128（或更大），每层的 MoE 包含两个串行阶段：
+
+```
+当前 Prefill 每层 MoE 执行：
+  [Load all miss experts via PCIe] → [MoE kernel (M=128)]
+  ====== 串行 ======                 ====== 串行 ======
+  ~7.6 ms (20 misses)                ~2.5 ms
+  GPU 空闲                            PCIe 空闲
+```
+
+#### 14.7.2 流水线化设计
+
+将 expert 加载和 MoE 计算拆分为 **micro-batch** 交替执行：
+
+```
+Proposed Pipeline (batch_size=4 experts per micro-batch):
+
+PCIe Stream:  [exp 0-3 load][exp 4-7 load][exp 8-11 load][exp 12-15 load][exp 16-19 load]
+               1.5ms          1.5ms          1.5ms          1.5ms          1.5ms
+GPU Stream:         ─────── [partial MoE 0-3] [partial MoE 4-7] [partial MoE 8-11] [12-15] [16-19]
+                              ~0.5ms           ~0.5ms           ~0.5ms      ~0.5ms   ~0.5ms
+
+Pipeline 总时间: 1.5 + 5 × max(1.5, 0.5) = 1.5 + 7.5 = ~9.0ms
+vs 串行总时间:   7.6 + 2.5 = ~10.1ms
+```
+
+但实际的主要收益来自 **PCIe 和 GPU 的重叠**，而非 micro-batching 本身。
+更简单且高效的策略是**流水线预取**：
+
+```
+Simplified Pipeline:
+  [Load exp 0-3] → [MoE(all cached + 0-3)] → 无需额外等待
+  ↕ parallel
+                    [Load exp 4-7 on prefetch stream]
+                                            → [MoE(更新后)] → ...
+```
+
+#### 14.7.3 与 Oracle 预取的协同
+
+在 prefill 阶段结合 §14.4 的级联预测：
+
+```
+Layer N Prefill:
+  1. 计算 routing → 确定需要加载的 miss experts
+  2. 开始加载 miss experts (PCIe stream)
+  3. 同时: 用 routing 结果预测 Layer N+1 的可能 experts
+  4. 当 miss experts 全部到位 → 执行 MoE kernel
+  5. MoE kernel 执行期间: PCIe stream 预取 Layer N+1 的预测 experts
+  6. Layer N+1 开始时: 部分 experts 已就位 → 更少的 miss → 更快
+
+级联效应（假设预取准确率 50%）:
+  Layer 0: 20 misses → 7.6ms PCIe
+  Layer 1: 12 misses → 4.6ms PCIe  (8 experts 被预取命中)
+  Layer 2: 10 misses → 3.8ms PCIe  (2 experts inter-layer reuse)
+  Layer 3+: ~8 misses → 3.0ms PCIe (级联稳态)
+```
+
+**TTFT 综合收益**：
+
+| 场景 | 无 ALPS | ALPS (Oracle + Pipeline) | 改善 |
+|------|--------|-------------------------|------|
+| 首请求 TTFT (128 tokens) | ~313 ms | ~220 ms | **-30%** |
+| 第二请求 TTFT | ~180 ms | ~150 ms | -17% |
+| 稳态请求 TTFT | ~100 ms | ~90 ms | -10% |
+
+### 14.8 ALPS 与先前工作的对比
+
+| 维度 | MoE-Lightning | KTransformers | MoE-Infinity | **ALPS** |
+|------|--------------|---------------|-------------|----------|
+| 预测方法 | 无 | 频率统计 | 训练的预测器 | **TASER remap oracle** |
+| 预测成本 | — | 统计开销 | 推理开销 | **零** |
+| 预测准确率 | — | ~80% | ~85% | **>99% (stale path)** |
+| pipline 粒度 | 层内算子 | 跨层 expert | 跨层 expert | **跨层 expert + 层内双流** |
+| 适用阶段 | batch 推理 | decode | decode+prefill | **decode+prefill** |
+| CPU 利用 | Attention | Expert GEMM | 无 | **Cache 验证** |
+| 精度影响 | 无 | <0.5% | 无 | **无（remap 只影响调度）** |
+| 需要改模型 | 是 | 是 | 否 | **否** |
+| CUDA Graph | 不支持 | 支持 | 不支持 | **支持（核心组件）** |
+
+**ALPS 的独特优势**：
+
+1. **零预测成本 + 99%+ 准确率**：TASER remap 表不是预测——是精确的
+   历史映射。在 stale path 中，映射完全有效。
+
+2. **确定性流水线**：CUDA Graph 要求执行路径确定，TASER fast path
+   天然满足这一要求。Oracle 预取也是确定性的（读取冻结的 remap 表）。
+
+3. **零精度风险**：ALPS 不修改任何 expert 计算、不跳过 expert、
+   不做近似。只改变操作的**时间顺序**，结果数值完全不变。
+
+4. **对 speculative decoding 友好**：EAGLE-3 的 K=3 推测解码意味着
+   M=4 固定 batch shape，完美适配 CUDA Graph capture。
+
+### 14.9 综合量化收益预测
+
+#### 14.9.1 Decode 吞吐
+
+| 组件 | 机制 | 预期改善 | 置信度 |
+|------|------|---------|--------|
+| CUDA Graph (§14.5) | 156→26 kernel launch | **+12%** | 高（文献验证） |
+| SharedExpert 并行 (§14.6) | 双流重叠 | **+5-7%** | 中（HBM 竞争未知） |
+| Oracle 预取 (§14.4) | miss stall 消除 | **+1-3%** | 高（但基线 miss < 1%） |
+
+**叠加预测**:
+
+$$14.63 \times 1.12 \times 1.06 \times 1.02 \approx \mathbf{17.7} \text{ tok/s} \quad (\mathbf{2.34\times} \text{ vs v1})$$
+
+#### 14.9.2 TTFT
+
+| 组件 | 场景 | 预期改善 |
+|------|------|---------|
+| 级联预热 (§14.4.2) | 首请求冷缓存 | **-25~30%** |
+| Prefill 流水线 (§14.7) | PCIe-GPU 重叠 | **-10~15%** |
+
+**首请求 TTFT 预测**：从 ~313ms 降至 ~220ms (**-30%**)
+
+#### 14.9.3 长期可叠加性
+
+ALPS 的四个组件与 INT8 量化**完全正交**：
+
+$$17.7 \times 1.20_{\text{INT8}} \approx \mathbf{21.2} \text{ tok/s} \quad (\mathbf{2.80\times} \text{ vs v1})$$
+
+### 14.10 实施路线图
+
+```
+Phase 1: CUDA Graph 捕获 ─────────── 2-3 天
+  ├ 封装 TASER fast path 为 Graph-compatible callable
+  ├ 实现 _LayerCUDAGraph + placeholder tensor 管理
+  ├ 添加 eager/graph 切换逻辑（validation step fallback）
+  └ A/B 测试验证 +12% 收益
+
+Phase 2: Oracle 跨层预取 ─────────── 1-2 天
+  ├ 实现 _oracle_prefetch() 方法
+  ├ 在 Phase 4 启动前 fork prefetch stream
+  ├ 添加预取命中率统计
+  └ A/B 测试（关注 validation step 性能）
+
+Phase 3: SharedExpert 并行化 ────── 1 天
+  ├ 重构 Phase 1/5 的 shared expert 调度
+  ├ 在 Phase 4 入口 fork shared stream
+  └ A/B 测试验证 HBM 竞争影响
+
+Phase 4: Prefill 级联预热 ─────────── 2-3 天
+  ├ 添加 prefill 模式检测（M > threshold）
+  ├ 实现层间 expert 频率统计
+  ├ 实现级联预取逻辑
+  └ TTFT benchmark 验证
+
+Phase 5: 综合集成与调优 ────────── 1-2 天
+  ├ 四组件联合 A/B 测试
+  ├ Profile 新的瓶颈分布
+  └ 参数调优（Graph batch size, prefetch depth 等）
+```
+
+### 14.11 风险评估
+
+| 风险 | 概率 | 影响 | 缓解 |
+|------|------|------|------|
+| CUDA Graph + Triton 不兼容 | 中 | 组件 II 无法实现 | 使用 `torch.compile` 替代；或 per-layer graph 而非 multi-layer |
+| SharedExpert HBM 竞争抵消收益 | 中 | 组件 III 收益为零 | 实测后决定是否保留 |
+| Prefill 预测准确率不足 | 低 | 组件 IV 收益减小 | 使用实际 routing 而非预测，仅做 PCIe-GPU 重叠 |
+| Graph replay 的 tensor copy 开销 | 低 | 组件 II 收益打折 | 使用 CUDA graph input capture 而非显式 copy |
+| `--enforce-eager` 用户兼容性 | 低 | 需要降级代码路径 | 已有 eager fallback |
+
+### 14.12 创新性总结
+
+**ALPS 的核心学术贡献**：
+
+1. **首次提出利用 stale routing 表作为跨层 expert 调度 oracle 的方法**。
+   不同于 MoE-Infinity 的训练预测器和 Pre-gated MoE 的额外网络，
+   ALPS 的 oracle 是 TASER 的直接副产品——零额外成本、>99% 准确率。
+
+2. **首次在 offloaded MoE + speculative decoding 场景下实现
+   确定性 CUDA Graph 捕获**。TASER 的 stale path 消除了 MoE forward
+   中的所有动态分支（cache lookup、CPU sync、eviction），
+   使 CUDA Graph 捕获成为可能——这在传统 offloading 系统中不可行。
+
+3. **提出 prefill 级联预热策略**，利用 MoE 层间 expert 激活的
+   时间-空间局部性，将串行的冷缓存加载转化为流水线化的级联预取，
+   降低首请求 TTFT。
+
+4. **统一 decode 和 prefill 的调度框架**：同一套 oracle 机制在
+   decode（remap 表精确预测）和 prefill（频率先验 + 层间相关性）
+   下以不同模式运作，无需分离的代码路径。
+
+> **一句话总结**：ALPS 将 TASER 从一个"跳过 cache 管理"的优化，
+> 升级为一个"预测未来、安排过去"的全层调度器——
+> 不仅跳过当前层的 Phase 3，还利用冻结的 remap 表
+> 为后续层安排预取、为 CUDA Graph 提供确定性保证、
+> 为 prefill 提供级联预热。
