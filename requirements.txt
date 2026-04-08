@@ -1,12 +1,21 @@
 # BriskMoE dependencies
-# Core runtime
-vllm==0.8.5
-torch==2.6.0
-speculators>=0.4.0
-numpy>=2.0
+#
+# Tested environment: Python 3.10, CUDA 12.8, RTX A6000 48 GB
+#
+# Install vllm first (it pulls torch, transformers, triton, etc.):
+#   pip install vllm==0.16.0
+#
+# Then install the remaining packages:
+#   pip install -r requirements.txt
 
-# Plotting (for benchmark visualization scripts)
+# --- Core runtime ---
+vllm==0.16.0
+torch>=2.9.0
+speculators>=0.4.0
+numpy>=2.2
+
+# --- Plotting (benchmark visualization) ---
 matplotlib>=3.8
 
-# Testing
+# --- Testing ---
 pytest>=7.0

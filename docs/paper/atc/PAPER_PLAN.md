@@ -6,8 +6,8 @@
 
 > **BriskMoE: Restoring Speculative Speedups for Offloaded Mixture-of-Experts Inference**
 
-- "Accelerating MoE Inference" — 核心贡献是加速 MoE 推理，不限定 offload 场景
-- "with Speculative Decoding" — SD 是手段/工具，而非被改进的对象
+- "Restoring Speculative Speedups" — 核心贡献是恢复 SD 在 offloaded MoE 上的加速效果
+- "for Offloaded Mixture-of-Experts Inference" — 明确场景是 offloaded MoE 推理
 
 ---
 
