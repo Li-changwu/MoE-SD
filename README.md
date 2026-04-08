@@ -98,15 +98,7 @@ The core benchmark runner feeds HumanEval prompts through `vllm.LLM.generate()` 
 VLLM_PLUGINS="" \
 python scripts/bench_humaneval_runner.py \
     --model /path/to/Qwen3-30B-A3B-Instruct-2507 \
-    --dataset data/humaneval_bench.jsonl \   git add -A
-   git commit -m "refactor: clean up repository for BriskMoE final framework
-   
-   - Remove 189 legacy files (collectors, controllers, configs, tools, etc.)
-   - Update core adapters (elmm_plugin, draft_prefetch_hook, vllm_elmm_plugin)
-   - Add new BriskMoE modules (dipp, elp, sacr, pred_cache, briskmoe_cache)
-   - Add benchmark scripts and test suite
-   - Rewrite README with comprehensive documentation
-   - Update requirements.txt and pyproject.toml"
+    --dataset data/humaneval_bench.jsonl \   
     --output-len 128 \
     --num-prompts 50 \
     --warmup-prompts 5 \
