@@ -1,263 +1,193 @@
-# vllm-moe-sd-scheduler
+# BriskMoE
 
+**Restoring Speculative Speedups for Offloaded Mixture-of-Experts Inference**
 
-<!-- AUTO_DASHBOARD_START -->
-## Optimization Dashboard Snapshot
+BriskMoE is a lightweight vLLM plugin that makes speculative decoding (SD) an effective latency accelerator for offloaded MoE serving on a single GPU. Without BriskMoE, enabling SD on offloaded MoE models yields negligible speedup (1.05×) due to cache-path overhead and SD-induced transient overflow. BriskMoE eliminates these bottlenecks, achieving up to **4.80×** speedup on Qwen3-30B-A3B and **5.00×** on GPT-OSS-120B.
 
-Updated: 2026-03-17 00:56 UTC  
-Dashboard HTML: [docs/dashboard/optimization_dashboard.html](docs/dashboard/optimization_dashboard.html)
+## Key Results
 
-### A. 当前最优结果卡片
-- **Best TTFT**: AUTO-CD38E89FCC | model=Qwen3-30B-A3B-Instruct-2507 | ttft_p95_ms=15475.566118224524 | delta=n/a | method=no_sd | policy=baseline
-- **Best TPOT**: AUTO-CD38E89FCC | model=Qwen3-30B-A3B-Instruct-2507 | tpot_p95_ms=788.2997422005117 | delta=n/a | method=no_sd | policy=baseline
-- **Best Throughput**: AUTO-CD38E89FCC | model=Qwen3-30B-A3B-Instruct-2507 | throughput_tok_per_s=8.174784865868432 | delta=n/a | method=no_sd | policy=baseline
-- **Best Goodput**: n/a
+| Model | AR Baseline | SD + Cache (naive) | SD + BriskMoE | Speedup |
+|-------|:-----------:|:------------------:|:-------------:|:-------:|
+| Qwen3-30B-A3B (BF16, top-8) | 2.01 tok/s | 7.67 tok/s | 9.98 tok/s | **4.80×** |
+| GPT-OSS-120B (MXFP4, top-4) | 2.40 tok/s | 11.52 tok/s | 12.01 tok/s | **5.00×** |
 
-### C. 实验结论分布
-- neutral: 2
+Hardware: NVIDIA RTX A6000 (48 GB), PCIe Gen4, 503 GB host RAM.
 
-### D. 模块贡献分布
-- baseline/eagle3: 1
-- baseline/no_sd: 1
+## Architecture
 
-### E. 当前推荐配置
-- model: Qwen3-30B-A3B-Instruct-2507
-- config: eagle3 + baseline
-- workload_scope: qps1.0_n8
-- risk: n/a
-- score_main: 0.0
-- is_merge_candidate: false
+BriskMoE addresses two bottlenecks unique to SD + expert caching:
 
-### F. 当前主要问题
-1. Long prompt workload 下 TTFT p95 偏高
+1. **Unblock** — eliminates cache-hit path overhead via Pool-Direct execution, synchronization-free cache routing (TASER), cross-layer prefetch, and fused-MoE kernel tuning.
+2. **Protect** — prevents SD-induced cache overflow via DIPP (Draft-Informed Prioritized Preloading), which exploits the draft-generation interval to pre-stage experts.
 
-### 最近实验台账
+BriskMoE is implemented as a non-intrusive vLLM general plugin (`adapters/vllm_elmm_plugin.py`). It monkey-patches the model worker after loading and requires **zero modification** to vLLM internals.
 
-| experiment_id | date | model | method | module | workload | ttft_p95_ms | tpot_p95_ms | throughput | goodput | result_label | score_main | merge_candidate |
-| --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- | ---: | --- |
-| AUTO-CD38E89FCC | 2026-03-16 | Qwen3-30B-A3B-Instruct-2507 | no_sd | baseline/no_sd | qps1.0_n8 | 15475.566118224524 | 788.2997422005117 | 8.174784865868432 |  | neutral | 0.0 | false |
-| AUTO-7DB5BD009B | 2026-03-16 | Qwen3-30B-A3B-Instruct-2507 | eagle3 | baseline/eagle3 | qps1.0_n8 | 18305.469982007053 | 992.7760795670902 | 6.042344974098638 |  | neutral | 0.0 | false |
-<!-- AUTO_DASHBOARD_END -->
+## Repository Layout
 
-A plugin-style scheduling framework for memory-constrained MoE inference with speculative decoding on top of vLLM.
-
-## What this project studies
-
-This project targets the following problem:
-
-> Under limited GPU memory, how should we jointly schedule phase behavior (prefill/decode), expert-related behavior, speculative decoding behavior, and runtime memory partitioning to improve throughput while reducing TTFT and TPOT?
-
-Our initial target stack is:
-
-- **Target model**: `Qwen/Qwen3-30B-A3B-Instruct-2507`
-- **Speculative decoding base**: vLLM native **EAGLE-3**
-- **Benchmark tool**: `vllm bench`
-- **Engineering goal**: plugin-style package that can be enabled on vLLM / vLLM-speculators with minimal intrusion
-
-## Repository layout
-
-- `adapters/`: version adapters for vLLM / speculators
-- `controllers/`: governor, phase-aware control, memory partition, prefetch logic
-- `collectors/`: acceptance, MoE trace, memory trace collectors
-- `configs/`: models, workloads, policies, experiment configs
-- `scripts/`: shell entrypoints
-- `tools/`: parsing and plotting tools
-- `results/`: raw / parsed / figure outputs
-- `docs/`: design and reproducibility notes
-
-## Quick start
-
-### 1. Initialize repository layout
-
-```bash
-make init-layout
+```
+adapters/               # Core BriskMoE plugin
+  elmm_plugin.py        #   ELMM: Expert-Level Memory Management (main module)
+  vllm_elmm_plugin.py   #   vLLM plugin entry point (registered via pyproject.toml)
+  draft_prefetch_hook.py #   Draft-guided expert prefetch hook for EAGLE-3
+  accept_reject_tracker.py # Per-expert accept/reject attribution tracker
+  sacr.py               #   SACR: Speculation-Aware Cache Replacement
+  elp.py                #   ELP: Expert Lifecycle Partitioning
+  dipp.py               #   DIPP: Draft-Informed Prioritized Preloading
+  pred_cache.py          #   PredCache: Predictive expert cache manager
+  briskmoe_cache.py      #   Unified cache facade (SACR + ELP + DIPP)
+scripts/                # Benchmark and experiment scripts
+tests/                  # Unit tests for each module
+data/                   # Benchmark datasets (HumanEval, GSM8K)
+docs/paper/             # ATC / SC paper sources
 ```
 
-### 2. Install package
+## Setup
+
+### Prerequisites
+
+- Python ≥ 3.10
+- NVIDIA GPU with ≥ 48 GB VRAM (tested on RTX A6000)
+- CUDA 12.x
+- Model weights downloaded to a local path
+
+### Installation
 
 ```bash
-make install-dev
+# Create conda environment
+conda create -n briskmoe python=3.10 -y
+conda activate briskmoe
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Install BriskMoE as editable package (registers the vLLM plugin)
+pip install -e .
 ```
 
-### 3. Bootstrap reproducible environment
+### Verify Installation
 
 ```bash
-make bootstrap-env
+python -c "from adapters.vllm_elmm_plugin import register; print('BriskMoE plugin ready')"
 ```
 
-This will create `.venv`, install dependencies, and write `docs/env_report.txt`.
+## Benchmarks
 
-### 4. Start vLLM server without speculative decoding
+All benchmarks use real HumanEval prompts (not random tokens) to produce realistic expert routing patterns. Results are written to `results/<experiment>/` as JSON files.
+
+### Environment Variables
+
+BriskMoE is controlled entirely via environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `VLLM_PLUGINS` | `""` | Set to `elmm` to activate BriskMoE |
+| `ELMM_CACHE_GB` | `8` | GPU expert cache size in GB |
+| `ELMM_POOL_DIRECT` | `1` | Enable Pool-Direct execution (skip scratchpad copy) |
+| `ELMM_STALE_REMAP` | `4` | TASER stale-remap threshold |
+| `ELMM_DIRECT_DISPATCH` | `0` | Enable direct dispatch optimization |
+| `BRISKMOE_DIPP` | `0` | Enable DIPP (Draft-Informed Prioritized Preloading) |
+| `BRISKMOE_SACR` | `0` | Enable SACR (Speculation-Aware Cache Replacement) |
+| `BRISKMOE_ELP` | `0` | Enable ELP (Expert Lifecycle Partitioning) |
+
+### 1. Single Run with `bench_humaneval_runner.py`
+
+The core benchmark runner feeds HumanEval prompts through `vllm.LLM.generate()` and measures per-prompt latency.
 
 ```bash
-make run-server-no-sd
+# AR baseline (no SD, no BriskMoE)
+VLLM_PLUGINS="" \
+python scripts/bench_humaneval_runner.py \
+    --model /path/to/Qwen3-30B-A3B-Instruct-2507 \
+    --dataset data/humaneval_bench.jsonl \
+    --output-len 128 \
+    --num-prompts 50 \
+    --warmup-prompts 5 \
+    --gpu-memory-utilization 0.90 \
+    --cpu-offload-gb 30 \
+    --max-model-len 4096 \
+    --enforce-eager \
+    --trust-remote-code \
+    --dtype bfloat16 \
+    --output-json results/ar_vanilla/result.json
 ```
 
-### 5. Benchmark no-SD baseline
+**Parameters explained:**
+- `--model`: Path to the HuggingFace model directory.
+- `--dataset`: JSONL file where each line contains `{"prompt": "..."}`.
+- `--output-len 128`: Generate 128 tokens per prompt.
+- `--num-prompts 50`: Number of timed prompts (after warmup).
+- `--warmup-prompts 5`: Prompts used for JIT warmup (not timed).
+- `--gpu-memory-utilization 0.90`: Fraction of GPU memory vLLM may use.
+- `--cpu-offload-gb 30`: Amount of model weights offloaded to CPU (GB).
+- `--max-model-len 4096`: Maximum sequence length (KV cache budget).
+- `--enforce-eager`: Disable CUDA graphs for deterministic offloading.
+- `--trust-remote-code`: Required for Qwen3 model code.
+- `--dtype bfloat16`: Model precision.
+- `--output-json`: Path to save result JSON (TPS mean/median, latency stats).
+
+**To enable speculative decoding**, add:
+```bash
+    --speculative-config '{"method":"eagle3","model":"/path/to/speculator.eagle3","num_speculative_tokens":3}'
+```
+This tells vLLM to use EAGLE-3 with K=3 draft tokens per step.
+
+### 2. Full Ablation: `bench_briskmoe_humaneval.sh`
+
+Runs 7 configurations sequentially to produce the ablation table:
+
+| # | Config | ELMM | SACR | ELP | DIPP | Description |
+|---|--------|:----:|:----:|:---:|:----:|-------------|
+| 1 | `ar_vanilla` | — | — | — | — | AR baseline (no SD) |
+| 2 | `sd_vanilla` | ✓ | — | — | — | SD + LRU cache only |
+| 3 | `sd_sacr` | ✓ | ✓ | — | — | + Speculation-Aware Replacement |
+| 4 | `sd_elp` | ✓ | — | ✓ | — | + Expert Lifecycle Partitioning |
+| 5 | `sd_dipp` | ✓ | — | — | ✓ | + Draft-Informed Preloading |
+| 6 | `sd_sacr_elp` | ✓ | ✓ | ✓ | — | SACR + ELP combined |
+| 7 | `sd_briskmoe` | ✓ | ✓ | ✓ | ✓ | Full BriskMoE |
 
 ```bash
-make run-baseline-no-sd
+# Edit paths in the script header, then:
+bash scripts/bench_briskmoe_humaneval.sh
 ```
 
-### 6. Start vLLM server with EAGLE-3
+Results are saved to `results/briskmoe_humaneval/<config>/result.json`.
+
+### 3. Cross-Architecture: `bench_gptoss_cross_arch.sh`
+
+Validates BriskMoE on GPT-OSS-120B (MXFP4 quantization, 128 experts, top-4 routing):
 
 ```bash
-make run-server-eagle3
+bash scripts/bench_gptoss_cross_arch.sh
 ```
 
-### 7. Benchmark EAGLE-3 baseline
+Runs 3 configurations: `ar_elmm`, `sd_elmm`, `sd_briskmoe`. Results in `results/gptoss_cross_arch/`.
+
+### 4. Cache Strategy Simulation: `bench_elp_dipp_ablation.py`
+
+Offline trace-based simulation of cache replacement policies (LRU, SACR, ELP, DIPP) across multiple cache sizes. Does **not** require GPU — operates on pre-recorded routing traces.
 
 ```bash
-make run-baseline-eagle3
+python scripts/bench_elp_dipp_ablation.py
 ```
 
-### 8. Run benchmark from config
+### 5. Motivation Figures: `collect_and_plot_real_motivation.py`
+
+Generates the paper's motivation figure data (working set expansion, throughput comparison):
 
 ```bash
-make run-bench CONFIG=configs/experiments/baseline_no_sd.yaml
+python scripts/collect_and_plot_real_motivation.py
 ```
 
-### 9. Build experiment decision board
+## Tests
 
 ```bash
-# initialize registry once
-make init-registry
+# Run all BriskMoE unit tests
+pytest tests/ -v
 
-# create one experiment directory
-make scaffold-exp EXP_ID=EXP-20260316-001 OWNER=sage ISSUE_ID=MOESD-001
-
-# after filling summary/compare files, upsert into registry
-make append-exp EXP_DIR=results/experiments/EXP-20260316-001
-
-# generate overview dashboard + regression table
-make dashboard-build
+# Run a specific test module
+pytest tests/test_dipp.py -v
 ```
 
-See docs/experiment_decision_board.md for full schema and policy.
+## Citation
 
-### 10. Refresh dashboard on README
-
-```bash
-# local refresh: regenerate dashboard + update README snapshot block
-make dashboard-readme
-
-# one-command refresh: parse raw bench results, sync registry, rebuild dashboard
-make dashboard-refresh
-```
-
-### 11. Run observability collectors
-
-```bash
-make collect-acceptance ACCEPT_TRACE=results/raw/trace/acceptance.jsonl
-make collect-moe-trace MOE_TRACE=results/raw/trace/moe_trace.jsonl
-make analyze-memory MEMORY_SNAPSHOTS=results/raw/trace/memory.jsonl
-```
-
-### 12. Build main and ablation artifacts
-
-```bash
-make main-results
-make ablation-results
-
-# full reproduction wrappers
-make reproduce-main
-make reproduce-ablation
-```
-
-The repository also includes an auto-refresh workflow:
-
-- .github/workflows/update-dashboard-readme.yml
-
-It updates README on:
-
-- push to experiment registry or experiment outputs
-- manual workflow dispatch
-- schedule (every 30 minutes)
-
-## Reproducibility Docs
-
-- `docs/version_matrix.md`: frozen environment matrix
-- `docs/workload_matrix.md`: frozen workload profiles
-- `docs/benchmark_contract.md`: benchmark metric/output contract
-- `docs/make_targets.md`: standardized make entrypoints
-- `docs/result_naming_convention.md`: result path + metadata contract
-- `docs/issue_execution_plan.md`: issue execution waves and policy
-- `docs/acceptance_report.md`: acceptance collector output contract
-- `docs/moe_trace_report.md`: MoE trace collector output contract
-- `docs/memory_breakdown.md`: memory decomposition output contract
-- `docs/integration_boundary.md`: plugin/adapter/patch boundary and rollout rules
-- `docs/config_protocol.md`: scheduler config and feature-flag contract
-- `docs/controller_interface.md`: frozen scheduler controller interface
-- `docs/state_schema.yaml`: request/phase/step state schema
-- `docs/decision_trace_schema.yaml`: decision trace schema
-- `docs/static_governor_v0.md`: static governor v0 rules and outputs
-- `docs/phase_aware_design.md`: phase-aware governor v1 design and rules
-- `docs/fallback_policy.md`: fallback and hot-switch policy
-- `docs/prefetch_design.md`: acceptance-aware prefetch v1 heuristic design
-- `docs/memory_partition_design.md`: dynamic memory partition controller v2 design
-- `docs/main_results.md`: main table and figure output contract
-- `docs/ablation_results.md`: ablation table and figure output contract
-- `docs/quickstart.md`: condensed setup and reproduction flow
-- `docs/benchmark_cookbook.md`: command cookbook for benchmark chains
-- `docs/config_zoo.md`: config index and usage
-
-## Package Runtime Entry
-
-After `make install-dev`, you can inspect runtime mode quickly:
-
-```bash
-moe-sd-runtime --config-json '{"model":"Qwen/Qwen3-30B-A3B-Instruct-2507","workload_profile":"online_medium","feature_flags":{"enable_controller":false}}'
-```
-
-## Research roadmap
-
-The project is organized around four milestones:
-
-- **M0**: environment and native baselines
-- **M1**: observability (acceptance, MoE expert trace, memory breakdown)
-- **M2**: plugin-style integration and unified scheduler interface
-- **M3**: core mechanisms
-  - static governor
-  - phase-aware governor
-  - acceptance-aware expert prefetch
-  - dynamic memory partition
-- **M4**: main experiments, ablations, artifact packaging
-
-## Design principles
-
-1. **Benchmark-first**
-   Every major change must be validated through `vllm bench`.
-
-2. **Observability before control**
-   We first measure acceptance dynamics, expert reuse, and memory pressure before implementing advanced scheduling logic.
-
-3. **Minimal-intrusion integration**
-   The project aims for a package-style integration with vLLM, using adapters and controlled hooks instead of large invasive patches whenever possible.
-
-4. **Reproducibility**
-   Every experiment should be tied to:
-   - model
-   - config
-   - workload profile
-   - git commit
-   - result directory
-
-## Immediate TODO
-
-- [ ] Freeze environment versions
-- [ ] Reproduce native no-SD baseline
-- [ ] Reproduce native EAGLE-3 baseline
-- [ ] Implement acceptance collector
-- [ ] Implement Qwen3 MoE expert trace collector
-- [ ] Implement memory breakdown analyzer
-- [ ] Freeze scheduler interface
-
-## Notes
-
-This repository is under active development. Early versions prioritize:
-
-- stable baselines
-- unified benchmarking
-- runtime observability
-
-over aggressive optimization.
+Paper under submission to USENIX ATC 2026.

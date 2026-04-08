@@ -1,0 +1,60 @@
+\documentclass[sigconf,review,anonymous,nonacm]{acmart}
+
+\settopmatter{printacmref=false, printccs=false, printfolios=true}
+\renewcommand\footnotetextcopyrightpermission[1]{}
+\setcopyright{none}
+\acmDOI{}
+\acmISBN{}
+\acmConference[SC '26]{The International Conference for High Performance Computing, Networking, Storage, and Analysis}{November 2026}{TBD}
+\acmBooktitle{SC '26: The International Conference for High Performance Computing, Networking, Storage, and Analysis}
+\acmYear{2026}
+\copyrightyear{2026}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{amsthm}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{multirow}
+\usepackage{tabularx}
+\usepackage{xspace}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usetikzlibrary{arrows.meta,calc,fit,positioning,shapes.misc,shapes.geometric}
+\pgfplotsset{compat=1.18}
+
+\newtheorem{definition}{Definition}
+
+\newcommand{\sysname}{BriskMoE\xspace}
+\newcommand{\pluginname}{BriskMoE\xspace}
+\newcommand{\war}{W_{\mathrm{AR}}}
+\newcommand{\wsd}{W_{\mathrm{SD}}}
+\newcommand{\beff}{B_{\mathrm{eff}}}
+\newcommand{\bhbm}{B_{\mathrm{HBM}}}
+\newcommand{\bpcie}{B_{\mathrm{PCIe}}}
+\newcommand{\placeholder}[1]{\textbf{[#1]}}
+
+\begin{document}
+
+\title{\sysname: Effective Speculative Decoding for Offloaded Mixture-of-Experts Inference on a Single GPU}
+
+\begin{abstract}
+CPU offloading enables commodity-GPU serving of Mixture-of-Experts (MoE) models, but efficient decoding then critically depends on expert caching. Since speculative decoding (SD) delivers substantial speedups on dense models, it is a natural candidate for further accelerating cache-assisted offloaded MoE decoding. However, SD performs worse than expected: multi-token verification substantially expands the per-layer expert working set, yet even when the cache is large enough to hold SD's steady-state working set, existing AR-optimized cache designs fail to translate this into proportional speedup. We analyze the interaction between cache capacity and SD effectiveness, and derive a memory threshold $M^*$ that marks a phase transition: below $M^*$, SD provides no benefit regardless of system optimizations; above $M^*$, two practical barriers still prevent SD from reaching its full potential, namely overhead on the cache-hit path and transient working-set overflow that triggers cascading evictions. To address these barriers, we present \sysname, a system with two complementary designs: 1)~\emph{Unblock} restores an HBM-speed cache-hit path by enabling direct execution on cache-resident experts, reusing stable expert-to-slot mappings on the common path, and overlapping residual misses with computation; 2)~\emph{Protect} pre-stages likely verification experts during draft generation, preventing transient working-set bursts from cascading into sustained cache misses. Extensive experiments on Qwen3-30B-A3B with EAGLE-3 show that \sysname achieves up to $4.80\times$ speedup over the offload baseline, increasing decode throughput from 2.08 to 9.98~tok/s.
+\end{abstract}
+
+\keywords{Mixture-of-Experts inference, speculative decoding, CPU offloading, GPU memory hierarchy, vLLM}
+
+\maketitle
+
+\input{sections/01-introduction}
+\input{sections/02-background}
+\input{sections/03-model}
+\input{sections/04-design}
+\input{sections/05-evaluation}
+\input{sections/06-related}
+\input{sections/07-conclusion}
+
+\bibliographystyle{ACM-Reference-Format}
+\bibliography{refs}
+
+\end{document}

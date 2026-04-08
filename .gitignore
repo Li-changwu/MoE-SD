@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.egg-info/
 .venv/
 venv/
 .env
@@ -10,20 +11,13 @@ venv/
 # Build
 build/
 dist/
-*.egg-info/
 
-# Local model weights
-models/
+# Results & logs (large, not tracked)
+results/
+logs/
 
-# Results
-results/raw/*
-results/parsed/*
-results/figures/*
-
-# Exceptions: keep directory structure
-!results/raw/.gitkeep
-!results/parsed/.gitkeep
-!results/figures/.gitkeep
+# Benchmark datasets (download separately)
+data/*.json
 
 # Jupyter
 .ipynb_checkpoints/
@@ -32,29 +26,9 @@ results/figures/*
 .DS_Store
 Thumbs.db
 
-# Downloaded datasets (local runtime artifacts)
-data/
-
 # Backup files
 *.bak
+*.bak2
 
-# Local GitHub Issues update tooling (machine-specific)
-docs/GITHUB_ISSUES_STATUS_REPORT.md
-docs/HOW_TO_UPDATE_GITHUB_ISSUES.md
-docs/UPDATE_ISSUES_WITHOUT_SUDO.md
-tools/quick_update_issues.py
-tools/update_github_issues.py
-scripts/update_github_issues.sh
-scripts/create_pilot_experiment_issues.py
-run_update_issues.sh
-
-# Runtime experiment logs
-logs/
-
-# Early-stage pilot runs (superseded by structured experiments)
-results/mvp_pilot_*/
-results/rerun_low_*/
-results/adaptive_comparison_*/
-
-# Quick test throughput snapshots (not paper data)
-results/test_throughput_*.json
+# Runtime
+nohup.out

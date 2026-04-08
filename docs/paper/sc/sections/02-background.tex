@@ -1,0 +1,65 @@
+\section{Preliminaries and Problem Setting}
+\label{sec:background}
+
+This section formalizes the serving scenario and introduces the key concepts used throughout the paper. Table~\ref{tab:notation} summarizes the notation.
+
+\begin{table}[t]
+\centering
+\caption{Notation used in the paper.}
+\label{tab:notation}
+\small
+\begin{tabular}{ll}
+\toprule
+Symbol & Meaning \\
+\midrule
+$L$ & Number of MoE layers \\
+$N$ & Experts per layer \\
+$k$ & Activated experts per token \\
+$m_e$ & Per-expert memory footprint \\
+$K$ & Speculation depth \\
+$\war$ & AR working set per layer \\
+$\wsd$ & SD working set per layer \\
+$S$ & Cache slots per offloaded layer \\
+$L_{\mathrm{off}}$ & Number of offloaded MoE layers \\
+$\eta$ & Expert-cache hit rate \\
+$\bhbm$ & Effective HBM bandwidth \\
+$\bpcie$ & Effective PCIe bandwidth \\
+$t_{\mathrm{miss}}$ & Per-expert PCIe miss cost ($m_e/\bpcie$) \\
+$M^*$ & Memory threshold for SD effectiveness \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Serving Setting}
+
+We study latency-first, single-request serving on a single GPU under CPU offloading. In this regime, the optimization target is user-visible decode latency rather than aggregate throughput across batched requests, because the system serves one interactive request at a time and the response is consumed token by token. Our focus is therefore on the decode path of offloaded MoE inference.
+
+We consider an MoE transformer with $L$ MoE layers, $N$ experts per layer, and top-$k$ routing. Each expert occupies $m_e$ bytes of weight memory. Although each token activates only a small subset of experts, the total expert memory exceeds the budget of a commodity single-GPU platform, so a subset of expert weights must reside in host memory and be fetched on demand during inference. This host--device memory asymmetry is the defining systems constraint in our setting.
+
+\subsection{Cached Offloading Baseline}
+\label{subsec:cached}
+
+Our baseline execution model is cached offloaded MoE inference. Recent systems maintain a GPU-resident expert cache to reduce repeated host-to-device transfers in offloaded MoE serving~\cite{xue2024moeinfinity,eliseev2023fast,hwang2023pregated}. Specifically, each offloaded MoE layer maintains $S$ cache slots in HBM. A \emph{cache hit} serves the requested expert directly from HBM, whereas a \emph{cache miss} fetches it from host memory over PCIe and fills a cache slot. Let $\eta \in [0,1]$ denote the fraction of expert accesses served from the cache.
+
+In practice, existing implementations such as MoE-Infinity adopt a \emph{scratchpad} execution model. Because experts may reside at arbitrary positions in the cache pool, the system copies all $W$ accessed experts into a contiguous scratchpad buffer before invoking the fused MoE kernel. Each layer's execution thus decomposes into four stages: $T_{\mathrm{sync}}$ (a GPU$\to$CPU round trip for cache lookup and slot management), $T_{\mathrm{copy}}$ (HBM-to-HBM scratchpad assembly, proportional to $W$), $T_{\mathrm{kernel}}$ (fused MoE kernel computation), and $T_{\mathrm{load}}$ (PCIe transfer for each cache miss, at cost $t_{\mathrm{miss}} = m_e / \bpcie$ per expert). The first three stages are incurred for every accessed expert regardless of cache hit or miss; only $T_{\mathrm{load}}$ depends on the miss count. Under AR decoding, $W = k = 8$ and these per-expert overheads are modest; Section~\ref{sec:model} examines what happens when SD expands $W$ substantially.
+
+\subsection{AR and SD Under Offloaded MoE}
+
+Speculative decoding (SD) uses a lightweight draft model to generate $K$ candidate tokens, which the target model then verifies in a single forward pass over $K{+}1$ tokens~\cite{leviathan2023fast,chen2023accelerating}. In dense models, this verification step largely reuses a fixed parameter set. In offloaded MoE inference, however, each verified token induces its own expert routing decision, so the set of accessed experts depends directly on the verify batch. In the rest of the paper, we use $K{=}3$ as the default speculation depth.
+
+Under autoregressive decoding, the per-layer expert working set is fixed at
+\[
+\war = k,
+\]
+Under SD, each of the $K{+}1$ verified tokens induces its own top-$k$ routing decision, so the per-layer working set becomes
+\[
+\wsd = \left|\bigcup_{i=1}^{K+1} \mathrm{top\text{-}k}_i\right|.
+\]
+If these routing decisions were independent, the expected union size would be
+\begin{equation}
+\mathbb{E}[\wsd]
+=
+N \left(1-\left(1-\frac{k}{N}\right)^{K+1}\right)
+\end{equation}
+In practice, routing decisions across nearby verified tokens are correlated, so the realized union is smaller but still substantially larger than under AR. The gap between $\war$ and $\wsd$ directly determines the minimum cache capacity required for SD to benefit from caching; we formalize this as a memory threshold in Section~\ref{sec:model}. Moreover, because each expert access in the scratchpad baseline incurs per-expert management overhead beyond the MoE kernel itself (\S\ref{subsec:cached}), the increase from $W=k$ to $W\approx\wsd$ also amplifies the aggregate per-layer cost, an effect we quantify in Section~\ref{sec:model}.
+

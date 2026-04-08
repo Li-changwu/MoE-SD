@@ -1,9 +1,0 @@
-name: online_short
-benchmark_modes: [serve, latency]
-prompt_len: 128
-output_len: 64
-request_rate: 1
-memory_pressure: loose
-sampling: deterministic
-k_candidates: [1, 2, 4, 8]
-seed: 42

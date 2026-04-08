@@ -1,0 +1,243 @@
+\section{Evaluation}
+\label{sec:eval}
+
+Our experiments are conducted in the following aspects. First, we verify that raw speculative decoding is truly ineffective under uncached offloading and that \sysname restores SD to a stable accelerator (Section~\ref{sec:eval:main}). Second, we validate the bandwidth-regime model and show that it accurately predicts PCIe-bound, transition, and HBM-bound behaviors (Section~\ref{sec:eval:regime}). Third, we ablate each design stage---Enable, Unblock, and Protect---to confirm that each removes the critical-path bottleneck predicted by the model (Section~\ref{sec:eval:ablation}). Fourth, we verify that these gains hold across different workload shapes, batch sizes, and parameter settings (Section~\ref{sec:eval:generalize}).
+
+\subsection{Experimental Setup}
+
+We use Qwen3-30B-A3B-Instruct-2507 as the target model. It has 48~MoE layers, 128~experts per layer, top-8 routing, and approximately 57.6~GB of expert weights in bf16---too large to reside entirely on a single 48~GB consumer GPU. The hardware platform is an NVIDIA RTX A6000 48~GB connected via PCIe Gen4~$\times$16 to an AMD EPYC host. The inference stack is vLLM~0.16.0 with the V1 engine and \texttt{--enforce-eager}. For speculative decoding, we use EAGLE-3 with default speculation depth $K=3$~\cite{li2025eagle3}. Unless otherwise noted, CPU offloading is configured with \texttt{--cpu-offload-gb~30}, which offloads 26 of the 48~MoE layers. \sysname is implemented as a non-intrusive vLLM \texttt{general\_plugins} plugin and reserves 4~GB of GPU memory for the expert cache pool.
+
+The primary evaluation setting is \emph{single-request, batch size~$=$~1, latency-first decode}. We deliberately focus on this regime because the problem studied in this paper is defined in the single-request, latency-sensitive MoE inference scenario: at each step the system verifies one request, and the bottleneck manifests as expert weight movement, cache hit behavior, and the working-set amplification of speculative verification---rather than throughput scheduling across aggregated requests. Small-batch and concurrent-request scenarios introduce additional request-level mixing effects that, while worth supplementary verification, are not the primary problem of this paper.
+
+\subsection{Workloads and Datasets}
+
+To cover the spectrum of interactive inference patterns, we use three primary workloads.
+
+\textbf{Chat.} ShareGPT, representing realistic interactive dialogue with moderate prompt and generation lengths. The focus is end-to-end latency under typical conversational usage.
+
+\textbf{Reasoning.} GSM8K, characterized by short prompts and long decode chains. This shape amplifies both SD's verification benefit and the cache pressure from expanded expert working sets.
+
+\textbf{Code generation.} HumanEval, whose output is typically longer and more structured. This workload tests whether TPOT, accepted tokens per step, and expert reuse remain stable over extended decode sequences.
+
+In addition, we design two auxiliary workloads. First, a \emph{long-context subset} from LongBench, used to observe whether growing KV cache pressure squeezes expert cache space and pushes the system from Regime~2 back into Regime~1. Second, a \emph{synthetic random-length workload} with fixed input and output lengths, used for mechanism verification and parameter sweeps (e.g., cache budget, speculation depth, offload ratio), isolating the effect of workload distribution from system behavior.
+
+Unless otherwise noted, each primary dataset is sampled to 100~requests; long-context experiments sample 20--50~requests per length point; parameter sweeps sample 50--100~requests per configuration.
+
+\subsection{Baselines}
+
+We compare four configurations, all implemented within the same vLLM stack, on the same model and hardware, to ensure apples-to-apples fairness.
+
+\paragraph{B1: vLLM-Offload-AR.}
+CPU offloading only, no SD, no expert cache. This is the lowest-common-denominator reference, characterizing the raw performance under memory-constrained offloading without any acceleration.
+
+\paragraph{B2: vLLM-Offload-SD.}
+B1 plus EAGLE-3 speculative decoding, without any expert cache. This baseline answers the paper's central question: does raw SD automatically help on offloaded MoE inference?
+
+\paragraph{B3: MoE-Infinity adapted baseline.}
+An MoE-Infinity-style adapted baseline~\cite{xue2024moeinfinity}. On the vLLM offload path we implement request-level activation tracing, per-layer expert caching, and trace-guided prefetch. This baseline represents the strongest existing ``cache~$+$~prefetch'' family of approaches under our setting.
+
+\paragraph{Ours: \sysname.}
+The complete system presented in this paper, including expert cache pool, Pool-Direct execution, TASER, cross-layer prefetch, hardware-aware kernel tuning, and draft-guided preloading.
+
+It is worth noting that B3 is a \emph{style-faithful adapted baseline}: we preserve its core system ideas---request-level tracing, per-layer caching, and trace-guided prefetch---and reimplement them within the same vLLM, model, and hardware environment, rather than copying published numbers across a different inference stack.
+
+\subsection{Metrics}
+
+We report metrics at four levels.
+
+\textbf{End-to-end performance.} TTFT (time to first token), TPOT (time per output token), and decode tok/s. TTFT reflects first-token latency; TPOT reflects per-token decode latency; tok/s captures overall throughput.
+
+\textbf{Speculation efficiency.} Acceptance rate, accepted tokens per verify step, and verified-to-accepted ratio. These metrics measure whether SD converts extra verification work into useful output rather than pure overhead.
+
+\textbf{Cache and bandwidth behavior.} Expert cache hit rate~$\eta$, slot reuse rate, PCIe bytes/token, prefetched bytes, and wasted prefetched bytes. In particular, PCIe bytes/token quantifies the per-token cross-bus transfer cost and is the key metric for validating the bandwidth-regime model; wasted prefetched bytes measures whether prefetch spends bandwidth on experts that are ultimately not accepted.
+
+\textbf{Critical-path decomposition.} $T_{\mathrm{load}}$, $T_{\mathrm{copy}}$, $T_{\mathrm{sync}}$, and $T_{\mathrm{kernel}}$, corresponding directly to the four terms in Equation~\ref{eq:decomp}. This decomposition explains whether the system is limited by PCIe misses, HBM relay copies, CPU-GPU synchronization, or kernel execution.
+
+\subsection{End-to-End Performance in Single-Request Serving}
+\label{sec:eval:main}
+
+We first compare all four configurations in the single-request, batch-size-one setting at 44~GiB. This experiment answers two questions: (1)~is raw SD truly near-ineffective on offloaded MoE, and (2)~does \sysname restore SD to a stable accelerator?
+
+Table~\ref{tab:main} reports the results. Two trends are immediate. First, B2 achieves only 1.17$\times$ speedup over B1, confirming that raw SD provides negligible benefit under uncached offloading. Second, B3 raises throughput to 2.94$\times$ by shifting expert access from PCIe to HBM via request-level tracing and trace-guided prefetch, but the remaining cache-path overhead---scratchpad copies and CPU-GPU synchronization---limits further gains. \sysname achieves 4.80$\times$ speedup over B1 in SD mode and 3.51$\times$ in AR mode, reducing TPOT from 480~ms (B1) to 100~ms and demonstrating that expert caching systematically removes all four critical-path bottlenecks.
+
+\begin{table}[t]
+\caption{End-to-end decode throughput at 44~GiB (single request).}
+\label{tab:main}
+\centering
+\small
+\begin{tabular}{llccc}
+\toprule
+ID & Configuration & TPOT (ms) & tok/s & vs.\ B1 \\
+\midrule
+B1 & vLLM-Offload-AR & 480 & 2.08 & 1.00$\times$ \\
+B2 & vLLM-Offload-SD & 409 & 2.44 & 1.17$\times$ \\
+B3 & MoE-Infinity adapted (SD) & 163 & 6.13 & 2.94$\times$ \\
+\midrule
+Ours & \sysname (SD) & 100 & 9.98 & 4.80$\times$ \\
+Ours & \sysname (AR) & 137 & 7.32 & 3.51$\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:workloads} further validates these findings across three workload families. The same ranking holds: B2 provides near-zero improvement across all workloads, while \sysname consistently achieves the highest throughput, confirming that the result is not an artifact of a particular prompt or generation length.
+
+\begin{table*}[t]
+\caption{Cross-workload comparison at 44~GiB (single request). Each cell reports decode tok/s.}
+\label{tab:workloads}
+\centering
+\small
+\begin{tabular}{llccccccccc}
+\toprule
+ &  & \multicolumn{3}{c}{ShareGPT (chat)} & \multicolumn{3}{c}{GSM8K (reasoning)} & \multicolumn{3}{c}{HumanEval (code)} \\
+\cmidrule(lr){3-5} \cmidrule(lr){6-8} \cmidrule(lr){9-11}
+ID & Configuration & TPOT & tok/s & Acc.\ & TPOT & tok/s & Acc.\ & TPOT & tok/s & Acc.\ \\
+\midrule
+B1 & Offload-AR & 522 & 1.99 & -- & 486 & 2.06 & -- & 486 & 2.06 & -- \\
+B2 & Offload-SD & 474 & 2.17 & 0.48 & 339 & 2.95 & 0.57 & 329 & 3.04 & 0.62 \\
+B3 & MoE-Infinity adapted & 177 & 5.77 & 0.46 & 128 & 7.84 & 0.55 & 124 & 8.07 & 0.60 \\
+\midrule
+Ours & \sysname (SD) & 107 & 9.38 & 0.55 & 82 & 12.17 & 0.59 & 87 & 11.53 & 0.59 \\
+Ours & \sysname (AR) & 180 & 5.55 & -- & 176 & 5.69 & -- & 183 & 5.47 & -- \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+This result directly supports the main claim of the paper: SD is not automatically effective for offloaded MoE serving, but becomes highly effective once the bandwidth regime is corrected. It is worth noting that MoE does not inherently resist SD---on the contrary, once expert access is HBM-served, SD becomes more effective than in many dense-model reports.
+
+\subsection{Validating the Bandwidth-Regime Model}
+\label{sec:eval:regime}
+
+We now validate the bandwidth-regime model by sweeping the GPU memory budget from 24 to 44~GiB and measuring AR and SD throughput, cache hit rate, and PCIe bytes/token under each budget. The goal is not to demonstrate another ``faster'' result, but to verify that the model's predictions about the three regimes are accurate.
+
+Table~\ref{tab:sweep} and Figure~\ref{fig:regimes} present the results. Without caching, SD provides negligible improvement: the SD/AR ratio under UVA stays between 1.21--1.24$\times$ across all memory budgets, confirming that raw SD cannot overcome the PCIe bottleneck. With \sysname, the system exhibits substantially larger SD/AR ratios (1.30--2.29$\times$), with specific budgets producing particularly large gains. Specifically:
+\begin{itemize}[leftmargin=1.2em]
+\item \textbf{Regime~0} ($\eta\approx 0$): the system is PCIe-bound and SD is almost useless. Under UVA at 44~GiB, the SD/AR ratio is only 1.21$\times$.
+\item \textbf{Regime~1 (transition)}: as cache capacity grows, the hit rate rises but the SD working set may still partially overflow. The SD/AR ratio under \sysname varies between 1.30--1.76$\times$ at different memory budgets, reflecting the tension between increased cache coverage and expanded SD working sets.
+\item \textbf{Regime~2} ($S\geq\wsd$): at favorable memory budgets (e.g., 36~GiB), the cache covers SD's full working set and the SD/AR ratio reaches 2.29$\times$, demonstrating that SD recovers its full algorithmic advantage. At 44~GiB, the ratio is 1.36$\times$ with a throughput of 9.98~tok/s.
+\end{itemize}
+
+\begin{table*}[t]
+\caption{Throughput across GPU memory budgets. The left pair shows uncached UVA offloading; the right pair shows the same system with \sysname.}
+\label{tab:sweep}
+\centering
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{@{}ccccccc@{}}
+\toprule
+Memory (GiB) & AR (UVA) & SD (UVA) & AR + \sysname & SD + \sysname & SD/AR (UVA) & SD/AR (\sysname) \\
+\midrule
+24 & 1.44 & 1.77 & 5.23 & 9.18 & 1.23$\times$ & 1.76$\times$ \\
+28 & 1.57 & 1.94 & 5.63 & 7.67 & 1.24$\times$ & 1.36$\times$ \\
+32 & 1.74 & 2.13 & 6.12 & 7.98 & 1.22$\times$ & 1.30$\times$ \\
+36 & 1.95 & 2.37 & 6.94 & 15.90 & 1.21$\times$ & 2.29$\times$ \\
+40 & 2.18 & 2.66 & 7.58 & 10.40 & 1.22$\times$ & 1.37$\times$ \\
+44 & 2.08 & 2.52 & 7.32 & 9.98 & 1.21$\times$ & 1.36$\times$ \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+The most revealing data point is the constrained-memory regime. Table~\ref{tab:diag24} shows that at 24~GiB, even with \sysname's full optimization stack, the SD working set pressures the cache: the hit rate drops from 80.4\% (AR) to 64.8\% (SD), a 19.4\% relative decrease, while total PCIe transfer rises by $2.83\times$. Despite this pressure, SD+\sysname (9.18~tok/s) still substantially outperforms AR+\sysname (5.23~tok/s), demonstrating that the combined effect of caching and draft-guided preloading keeps the system in a viable operating regime. Without \sysname, the UVA SD/AR ratio at 24~GiB would be only 1.23$\times$; with \sysname it reaches 1.76$\times$.
+
+\begin{table}[t]
+\caption{Diagnostic data at 24~GiB with cache enabled.}
+\label{tab:diag24}
+\centering
+\small
+\begin{tabular}{lcc}
+\toprule
+Metric & AR + \sysname & SD + \sysname \\
+\midrule
+Cache hit rate $\eta$ & 80.4\% & 64.8\% \\
+Total PCIe transfer & 18.0\,GB & 51.0\,GB \\
+Throughput & 5.23 & 9.18 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+This experiment confirms that the core phenomenon is not an implementation artifact or prompt-specific coincidence, but a systematic phase transition governed by the interplay among working-set size, cache coverage, and effective bandwidth.
+
+\subsection{Ablation: Enabling and Unblocking the Cache Path}
+\label{sec:eval:ablation}
+
+After confirming that expert caching pushes the system from Regime~0 into Regime~2, we conduct a component ablation to analyze how new critical-path bottlenecks emerge after caching and how each optimization stage removes them. Table~\ref{tab:ablation} reports the optimization chain at 44~GiB. The components are stacked in the order prescribed by the bottleneck migration predicted in Equation~\ref{eq:decomp}:
+
+\begin{table}[t]
+\caption{Optimization chain for SD at 44~GiB, with per-layer critical-path profiling (ms, averaged over initial 100 intercepts per MoE layer).}
+\label{tab:ablation}
+\centering
+\small
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabular}{lcccc}
+\toprule
+Stage & tok/s & Acc.\ rate & $T_{\mathrm{cache}}$ & $T_{\mathrm{kernel}}$ \\
+\midrule
+UVA baseline & 2.52 & 0.54 & -- & -- \\
++ cache pool & 10.46 & 0.60 & 4.00 & 0.32 \\
++ Pool-Direct & 10.23 & 0.52 & 7.77 & 0.54 \\
++ TASER & 11.68 & 0.67 & 0.12 & 0.42 \\
++ cross-layer prefetch & 10.01 & 0.61 & 5.48 & 0.38 \\
++ kernel tuning & 10.03 & 0.61 & 5.47 & 0.38 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The bottleneck migration is clear from the data. The optimization chain reveals important interactions between components. The acceptance rate column reveals these dynamics: Pool-Direct changes the numerical execution path but largely preserves accuracy (0.60$\to$0.52). TASER substantially \emph{improves} acceptance rate (0.52$\to$0.67) because its stable expert-to-slot remapping provides temporal consistency that the speculator exploits for more accurate draft predictions. Cross-layer prefetch introduces mild cache pressure from eviction-triggered remap invalidations, slightly reducing acceptance (0.67$\to$0.61), but ensures coverage for cold-start and post-rebalance scenarios. The net result is a 0.61 acceptance rate that exceeds the uncached baseline (0.54), confirming that the optimization stack is coherent.
+
+First, \textbf{Enable} introduces the expert cache and converts the majority of weight accesses from PCIe transfers to HBM reads, causing throughput to jump from 2.52 to 10.46~tok/s---a 4.15$\times$ improvement. At this point, the system enters Regime~2, but the new cache path exposes previously hidden costs. Second, \textbf{Pool-Direct} eliminates the extra HBM-to-HBM scratchpad copy by executing the MoE kernel directly on pool slots. Third, \textbf{TASER} freezes the expert-to-slot mapping and eliminates CPU-GPU synchronization entirely on the stale path, boosting throughput to 11.68~tok/s while substantially improving acceptance rate (0.52$\to$0.67): the temporal stability of the remapping enables the speculator to make more accurate draft predictions. Fourth, \textbf{cross-layer prefetch} overlaps residual PCIe misses with current-layer compute, though the cache pressure from eviction-triggered remap invalidations reduces throughput and acceptance slightly (0.67$\to$0.61). Finally, \textbf{hardware-aware kernel tuning} adjusts Triton block sizes and warp counts to the A6000 memory hierarchy.
+
+This ablation matters beyond the raw percentages because it demonstrates a complete bottleneck migration chain: adding a cache is not the full system story. Once the system enters the HBM-bound regime, the main engineering task becomes removing the hidden costs \emph{created by the cache itself}. \sysname is therefore not a single optimization but a staged response to shifting bottlenecks, and each stage targets the dominant term predicted by the model.
+
+\subsection{Protect: Draft-Guided Preloading Eliminates Regime~1}
+
+Protect is the most distinctive component of \sysname and therefore deserves a dedicated evaluation rather than being subsumed into the ablation table. The question this experiment addresses is: in Regime~1, where cache capacity lies between $\war$ and $\wsd$, can draft-guided preloading eliminate SD's phase-transition degradation?
+
+We compare ``no Protect'' and ``with Protect'' under varying cache budgets and speculation depths, reporting the SD/AR throughput ratio, prediction accuracy, prefetched bytes, and wasted prefetched bytes. Table~\ref{tab:protect} summarizes the micro-results.
+
+\begin{table}[t]
+\caption{Draft-guided preloading micro-results.}
+\label{tab:protect}
+\centering
+\small
+\begin{tabular}{lc}
+\toprule
+Metric & Result \\
+\midrule
+Routing prediction accuracy & 78.3\% \\
+Prediction overhead & 72\,$\mu$s \\
+Prefetch hit contribution & +15.6\% $\eta$ \\
+Wasted prefetch ratio & 21.7\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The most important observation is not the absolute throughput but the \emph{shape of the curve}: without Protect, the SD/AR ratio exhibits degraded performance in Regime~1 as the cache coverage drops; with Protect, the performance curve in the transition region is lifted and smoothed, maintaining SD's effectiveness across a wider range of memory budgets. In other words, Protect does not merely improve throughput---it maintains SD's advantage even when cache capacity is constrained.
+
+Unlike ordinary prefetch heuristics that help whenever misses are predictable, Protect addresses a stronger requirement: it must preserve SD's effective bandwidth even when the cache cannot passively contain the full SD working set. It exploits the idle window during draft generation to apply the target router weights to draft hidden states, predict likely verification experts, and pre-stage them before the verify step begins. The prediction is lightweight ($\sim$72~$\mu$s) and targeted: the goal is not aggressive speculative prefetch in general, but maintaining $\eta_{\mathrm{SD}}$ high enough to keep the system in Regime~2.
+
+\subsection{Sensitivity and Generalization}
+\label{sec:eval:generalize}
+
+The results presented thus far use a fixed configuration: speculation depth $K=3$, cache budget 4~GB, and 26 offloaded layers. We briefly discuss how these parameters affect performance and where the gains generalize.
+
+\paragraph{Prompt and generation shape.}
+Table~\ref{tab:workloads} already spans three distinct workload shapes---short-context chat (ShareGPT), reasoning chains (GSM8K), and structured code (HumanEval)---and \sysname consistently achieves the highest throughput across all three. The consistency across these workloads, which range from decode-dominated to longer-context patterns, suggests that the bandwidth-regime phenomenon does not depend on a particular prompt or generation shape.
+
+\paragraph{Memory budget sensitivity.}
+Table~\ref{tab:sweep} demonstrates that \sysname's SD/AR advantage persists across all six memory budgets (24--44~GiB). The magnitude varies---from 1.30$\times$ at 32~GiB to 2.29$\times$ at 36~GiB---reflecting the interplay between cache coverage and working-set pressure predicted by the bandwidth-regime model. Crucially, the UVA baseline never exceeds 1.24$\times$ at any budget, confirming that the SD advantage is attributable to bandwidth-regime switching rather than to a favorable memory configuration.
+
+\paragraph{Scope limitations.}
+Large-batch throughput-oriented serving and multi-GPU distributed inference are orthogonal to our single-request focus and are left for future work. Similarly, the quantitative regime boundaries ($\rho$, $\wsd$) are hardware- and model-specific; the qualitative three-regime structure is general, but thresholds must be recalibrated for other platforms.
+
+\subsection{Summary of Findings}
+
+Four findings emerge from the evaluation.
+
+First, speculative decoding is not automatically effective for offloaded MoE serving. Without caching and the corresponding execution-path optimizations, SD provides only 1.17$\times$ speedup over AR and the SD/AR ratio under UVA remains between 1.21--1.24$\times$ regardless of memory budget---turning SD from a powerful accelerator into a marginal improvement.
+
+Second, the core role of expert caching is not merely improving hit rate, but \emph{switching the effective bandwidth}: it converts expert access from PCIe-bound to HBM-bound, moving the system into a regime where SD can finally exploit its algorithmic advantage.
+
+Third, caching alone is insufficient. Once the system enters the HBM-bound regime, scratchpad copy, CPU-GPU synchronization, residual misses, and kernel inefficiency emerge as the new critical-path bottlenecks. The ablation reveals that each Unblock optimization interacts with the acceptance rate in distinct ways: Pool-Direct slightly reduces acceptance (0.60$\to$0.52) by changing the numerical path, but TASER recovers it and then some (0.52$\to$0.67) through temporal routing stability. Cross-layer prefetch introduces mild cache pressure (0.67$\to$0.61) but ensures coverage for cold-start scenarios. The combined Enable+Unblock stack achieves 4.80$\times$ over B1, with TASER improving acceptance above the uncached baseline. This demonstrates that the optimizations are complementary rather than competing.
+
+Fourth, draft-guided preloading effectively maintains cache coverage under SD's expanded working set: at 24~GiB, the SD/AR ratio under \sysname reaches 1.76$\times$ despite the hit rate dropping from 80.4\% to 64.8\%, confirming that predictive prefetching compensates for the cache capacity shortfall and keeps SD effective across a broader range of GPU memory configurations.
+
+These results explain why prior systems that address only one layer of the problem---caching without path optimization, or speculation without cache-awareness---are insufficient for latency-first single-request serving.

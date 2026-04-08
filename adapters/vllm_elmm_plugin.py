@@ -66,15 +66,29 @@ def register():
         enable_adaptive = os.environ.get("ELMM_ADAPTIVE_BUDGET", "1") == "1"
         rebalance_interval = int(os.environ.get("ELMM_REBALANCE_INTERVAL", "5000"))
         pool_direct = os.environ.get("ELMM_POOL_DIRECT", "1") == "1"
-        direct_dispatch = os.environ.get("ELMM_DIRECT_DISPATCH", "1") == "1"
-        gpu_cache = os.environ.get("ELMM_GPU_CACHE", "1") == "1"
+        direct_dispatch = os.environ.get("ELMM_DIRECT_DISPATCH", "0") == "1"
+        gpu_cache = os.environ.get("ELMM_GPU_CACHE", "0") == "1"
         phase_profiling = os.environ.get("ELMM_PROFILE", "0") == "1"
+        profile_warmup = int(os.environ.get("ELMM_PROFILE_WARMUP", "200"))
+        profile_steps = int(os.environ.get("ELMM_PROFILE_STEPS", "100"))
         stale_remap = int(os.environ.get("ELMM_STALE_REMAP", "0"))
         stale_remap_warmup = int(os.environ.get("ELMM_STALE_REMAP_WARMUP", "32"))
         stale_remap_max_interval = int(os.environ.get("ELMM_STALE_REMAP_MAX_INTERVAL", "128"))
         enable_cuda_graph = os.environ.get("ELMM_CUDA_GRAPH", "1") == "1"
         enable_shared_parallel = os.environ.get("ELMM_SHARED_PARALLEL", "1") == "1"
         enable_oracle_prefetch = os.environ.get("ELMM_ORACLE_PREFETCH", "1") == "1"
+        # BriskMoE integration
+        enable_sacr = os.environ.get("BRISKMOE_SACR", "0") == "1"
+        enable_elp = os.environ.get("BRISKMOE_ELP", "0") == "1"
+        enable_dipp = os.environ.get("BRISKMOE_DIPP", "0") == "1"
+        enable_pred_cache = os.environ.get("BRISKMOE_PREDCACHE", "0") == "1"
+        pred_cache_lru_weight = float(os.environ.get("BRISKMOE_PREDCACHE_LRU_WEIGHT", "10.0"))
+        sacr_alpha = float(os.environ.get("BRISKMOE_SACR_ALPHA", "0.3"))
+        sacr_beta = float(os.environ.get("BRISKMOE_SACR_BETA", "0.2"))
+        sacr_gamma = float(os.environ.get("BRISKMOE_SACR_GAMMA", "0.5"))
+        elp_pin_ratio = float(os.environ.get("BRISKMOE_ELP_PIN_RATIO", "0.7"))
+        elp_promotion_threshold = int(os.environ.get("BRISKMOE_ELP_THRESHOLD", "5"))
+        elp_demotion_window = int(os.environ.get("BRISKMOE_ELP_DEMOTION", "50"))
 
         from adapters.elmm_plugin import ELMMConfig, activate_elmm
 
@@ -91,17 +105,50 @@ def register():
             enable_direct_dispatch=direct_dispatch,
             enable_gpu_cache=gpu_cache,
             enable_phase_profiling=phase_profiling,
+            profile_warmup=profile_warmup,
+            profile_steps=profile_steps,
             stale_remap_interval=stale_remap,
             stale_remap_warmup=stale_remap_warmup,
             stale_remap_max_interval=stale_remap_max_interval,
             enable_cuda_graph=enable_cuda_graph,
             enable_shared_parallel=enable_shared_parallel,
             enable_oracle_prefetch=enable_oracle_prefetch,
+            enable_sacr=enable_sacr,
+            enable_elp=enable_elp,
+            enable_dipp=enable_dipp,
+            sacr_alpha=sacr_alpha,
+            sacr_beta=sacr_beta,
+            sacr_gamma=sacr_gamma,
+            elp_pin_ratio=elp_pin_ratio,
+            elp_promotion_threshold=elp_promotion_threshold,
+            elp_demotion_window=elp_demotion_window,
+            enable_pred_cache=enable_pred_cache,
+            pred_cache_lru_weight=pred_cache_lru_weight,
         )
 
         model = self.model_runner.model
         activate_elmm(model, config)
         print(f"[ELMM] activate_elmm() complete", file=sys.stderr, flush=True)
+
+        # Fix memory accounting: ELMM allocates GPU cache + scratchpad
+        # OUTSIDE vLLM's model_memory_usage tracking context.
+        # Without this, vLLM over-allocates KV cache and OOMs.
+        elmm_mgr = __import__("adapters.elmm_plugin", fromlist=["get_elmm_manager"]).get_elmm_manager()
+        if elmm_mgr and elmm_mgr._installed:
+            elmm_gpu_bytes = 0
+            # Cache pools
+            for cache in elmm_mgr._layer_caches.values():
+                elmm_gpu_bytes += cache._w13_pool.nelement() * cache._w13_pool.element_size()
+                elmm_gpu_bytes += cache._w2_pool.nelement() * cache._w2_pool.element_size()
+            # Scratchpad
+            if elmm_mgr._scratch_w13 is not None:
+                elmm_gpu_bytes += elmm_mgr._scratch_w13.nelement() * elmm_mgr._scratch_w13.element_size()
+            if elmm_mgr._scratch_w2 is not None:
+                elmm_gpu_bytes += elmm_mgr._scratch_w2.nelement() * elmm_mgr._scratch_w2.element_size()
+            self.model_runner.model_memory_usage += elmm_gpu_bytes
+            print(f"[ELMM] Added {elmm_gpu_bytes / 1024**3:.2f} GiB to model_memory_usage "
+                  f"(total: {self.model_runner.model_memory_usage / 1024**3:.2f} GiB)",
+                  file=sys.stderr, flush=True)
 
         # Install draft-guided prefetch hook (if prefetch enabled)
         if enable_prefetch:

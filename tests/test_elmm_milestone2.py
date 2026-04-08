@@ -79,6 +79,7 @@ class MockFusedMoE(torch.nn.Module):
     def __init__(self, num_experts=16, hidden=32, intermediate=64, top_k=4):
         super().__init__()
         self.num_experts = num_experts
+        self.global_num_experts = num_experts
         self.top_k = top_k
 
         # Expert weights in (E, 2N, D) and (E, D, N) format

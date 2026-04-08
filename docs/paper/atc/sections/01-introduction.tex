@@ -1,0 +1,63 @@
+\section{Introduction}
+
+% ¶1 具体问题切入（ATC风格：快速进入实际场景）
+Mixture-of-Experts (MoE) models scale language model capacity by routing each token through only a few selected experts, keeping per-token computation manageable while expanding the total parameter count to hundreds of billions~\cite{lepikhin2021gshard,fedus2022switch,rajbhandari2022deepspeed}.
+This efficiency makes MoE the architecture of choice for many open-weight frontier models, including Qwen3, Mixtral, and DeepSeek-V3.
+For practitioners serving these models on commodity GPUs, however, the large number of experts creates a tension:
+the aggregate expert weight far exceeds GPU memory, forcing expert weights to be offloaded to host DRAM.
+Speculative decoding (SD) is the standard technique for accelerating autoregressive LLM decoding, routinely delivering $2$--$3\times$ speedup on dense models~\cite{leviathan2023fast,chen2023accelerating,li2024eagle,li2025eagle3}.
+A natural question is whether SD can similarly accelerate offloaded MoE serving.
+We find that, without careful system support, \emph{it cannot}.
+
+% ¶2 Motivating Example + Figure 1
+Consider deploying Qwen3-30B-A3B on a 48\,GB GPU.
+Its 128 experts per layer require about 57.6\,GB in BF16---exceeding the GPU budget---so the standard remedy is CPU offloading via PCIe.
+As Figure~\ref{fig:motivation} shows, naively enabling SD under this setting yields a mere $1.17\times$ speedup, far below the $2$--$3\times$ expected for dense models.
+The culprit is not a weak draft model.
+Multi-token verification forces each layer to activate a wider set of experts: $\wsd \approx 19.3$ on average (up to 26.9), compared with $\war = 8$ for single-token decoding, amplifying PCIe transfer volume by $2.4\times$.
+SD fails here not because it lacks algorithmic advantage, but because it \emph{amplifies the memory bottleneck}.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/fig_motivation.pdf}
+\caption{Profiling Qwen3-30B-A3B on one 48\,GB GPU. (a)~SD expands the per-layer expert working set from $\war=8$ to $\wsd\approx 19.3$ (up to 26.9), amplifying PCIe transfer by $2.4\times$. (b)~End-to-end throughput: SD alone yields only $1.17\times$, but \sysname reaches $4.80\times$ by eliminating cache-path bottlenecks.}
+\Description{Panel a shows a bar chart of 48 MoE layers comparing AR working set of 8 with SD working set ranging from 14 to 27. Panel b shows a 4-way grouped bar chart at 44 GB where SD plus BriskMoE reaches 9.98 tokens per second.}
+\label{fig:motivation}
+\end{figure}
+
+% ¶3 缓存——必要但远不充分（核心洞见段）
+A well-known technique to mitigate offloading overhead is to cache frequently used experts in GPU memory, as done by MoE-Infinity~\cite{xue2024moeinfinity} and pre-gated MoE~\cite{hwang2023pregated}.
+We derive a minimum GPU memory budget $M^*$ required for the cache to accommodate SD's expanded working set, and confirm that allocating at least $M^*$ is a necessary precondition (Section~\ref{sec:model}).
+However, we find that \emph{caching is necessary but far from sufficient}: even when every expert access hits the GPU cache, the system achieves only 29\% of peak compute efficiency.
+Our profiling reveals two previously unrecognized bottlenecks that are unique to the combination of SD and expert caching:
+%
+\begin{itemize}[leftmargin=1.2em,topsep=2pt,itemsep=1pt]
+\item \textbf{Cache-hit path overhead.}
+Even on a full cache hit, scratchpad memory copies and GPU--CPU synchronization on the cache-hit path consume $2.4\times$ the actual kernel compute time~(\textbf{Obs.\,1}).
+This overhead exists regardless of cache hit rate; prior cached-MoE systems never exposed it because AR decoding processes only one token per step, making the absolute expert compute---and thus its overhead---negligible relative to other latency components such as attention.
+SD's multi-token verification turns expert computation into the critical path, amplifying this previously hidden cost into the dominant bottleneck.
+
+\item \textbf{SD-induced transient overflow.}
+SD's per-step working set fluctuates well above the steady-state average, triggering bursts of cache evictions that cascade across $\sim$8 subsequent steps~(\textbf{Obs.\,2}).
+Cache-based systems designed for AR decoding do not anticipate this transient pressure because single-token inference produces a stable, predictable access pattern.
+\end{itemize}
+
+% ¶4 BriskMoE 方案 + 实用性
+To address these bottlenecks, we present \sysname, a lightweight system that makes speculative decoding an effective latency accelerator for offloaded MoE inference on a single GPU.
+\sysname targets each bottleneck with a dedicated design:
+(1)~\textbf{Unblock} eliminates hit-path overhead through direct in-pool expert execution, synchronization-free cache routing, cross-layer prefetching, and fused-MoE kernel tuning;
+(2)~\textbf{Protect} prevents SD-induced cache overflow by exploiting the draft-generation interval to pre-stage the experts that verification will likely need.
+\sysname is implemented as a non-intrusive plugin for vLLM~\cite{kwon2023vllm} with fewer than 800 lines of core logic and requires zero modification to the inference runtime, making it immediately deployable on existing serving stacks.
+
+% ¶5 贡献列举（动词开头 + section引用）
+In summary, this paper makes the following contributions.
+\begin{itemize}[leftmargin=1.2em]
+\item We present a systematic profiling study of speculative decoding under single-request offloaded MoE serving. We derive a minimum memory threshold $M^*$ that determines whether SD can be effective and identify two previously unrecognized bottlenecks---cache-hit path overhead and SD-induced transient overflow---that explain why expert caching alone is insufficient (Section~\ref{sec:model}).
+
+\item We develop \sysname, a system with two complementary designs---\emph{Unblock} and \emph{Protect}---that systematically removes the identified bottlenecks. \sysname is implemented as a non-intrusive vLLM plugin, requiring zero changes to the host runtime (Sections~\ref{sec:design} and~\ref{sec:impl}).
+
+\item We evaluate \sysname on two MoE architectures---Qwen3-30B-A3B (BF16, top-8) and GPT-OSS-120B (MXFP4, top-4)---across three workloads. \sysname achieves up to $4.80\times$ speedup on Qwen3-30B and $5.00\times$ on GPT-OSS-120B over the offload baseline, restoring SD to a $1.36\times$ multiplier over cached autoregressive decoding (Section~\ref{sec:eval}).
+\end{itemize}
+
+% ¶6 论文组织
+The rest of the paper is organized as follows. Section~\ref{sec:background} introduces the serving scenario and notation. Section~\ref{sec:model} presents the profiling study and analytical model. Section~\ref{sec:design} describes the \sysname design. Section~\ref{sec:impl} details the implementation. Section~\ref{sec:eval} reports experimental results. Section~\ref{sec:related} discusses related work and Section~\ref{sec:conclusion} concludes.

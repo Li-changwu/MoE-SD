@@ -1,0 +1,18 @@
+\section{Related Work}
+\label{sec:related}
+
+\subsection{Speculative Decoding}
+
+Speculative decoding was introduced as a lossless acceleration mechanism for autoregressive language models by Leviathan et al.~and Chen et al.~\cite{leviathan2023fast,chen2023accelerating}. Subsequent work expanded the design space of draft models and verification strategies, including tree-based speculation, feature reuse, and dynamic depth control~\cite{miao2024specinfer,li2024eagle,li2024eagle2,li2025eagle3}. These works provide highly valuable techniques and mechanisms, but they largely assume that verification cost remains close to the cost of one target-model step---an assumption that is accurate for dense models but fails in our setting, because MoE verification expands the expert working set under CPU offloading.
+
+\subsection{MoE Inference and Offloading}
+
+Prior MoE systems have focused on distributed expert placement, multi-GPU execution, or offloading for autoregressive decoding~\cite{rajbhandari2022deepspeed,hwang2023tutel,eliseev2023mixtral,xue2024moeinfinity,hwang2023pregated}. These systems improved the practicality of large MoE models, but none of them identified the cache-speculation tension created by multi-token verification. In particular, MoE-Infinity and pre-gated MoE optimize single-token decode and therefore cannot explain why a cache that benefits AR may still harm SD.
+
+\subsection{MoE Plus Speculative Decoding}
+
+Recent work has started to combine MoE serving with speculative inference. Batch-oriented studies such as SpecMoE-Offload use Roofline-style reasoning and show that SD improves offloaded MoE throughput when the system loads a large expert set per batch~\cite{liu2025specmoeoffload}. Other approaches budget total expert activations, separate prefill and decode, or speculate on future expert activation~\cite{yi2025moespec,jin2024spmoe,park2025moespac}. However, these methods treat caching and speculation as largely orthogonal concerns. Unlike existing methods, our work actively studies their co-dependence: caching enables SD, while SD can also break caching. Moreover, \sysname addresses the operator-level cache path after the regime transition, not only the scheduling policy before it.
+
+\subsection{Operator-Level Inference Co-Design}
+
+Our work is also linked to the literature on operator-level inference co-design. Systems such as FlashAttention and PagedAttention improve model serving by redesigning memory movement rather than changing the model itself~\cite{dao2022flashattention,dao2024flashattention2,kwon2023vllm}. \sysname applies the same philosophy to offloaded MoE serving: once the model-level algorithm is fixed, most of the remaining wins come from controlling how expert data move through the memory hierarchy.

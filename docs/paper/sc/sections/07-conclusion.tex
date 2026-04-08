@@ -1,0 +1,4 @@
+\section{Conclusion}
+\label{sec:conclusion}
+
+We have presented \sysname, a novel system that makes speculative decoding effective for single-request offloaded MoE inference. \sysname is developed with three novel designs: Enable switches expert access from PCIe to HBM via per-layer cache pools, Unblock removes the emerging cache-path bottlenecks through Pool-Direct, TASER, and Oracle Prefetch, and Protect maintains cache coverage under SD's expanded working set via draft-guided preloading. Our extensive experiments based on Qwen3-30B-A3B with EAGLE-3 confirm that \sysname achieves up to $4.80\times$ speedup over the offload baseline and restores SD to a $1.36\times$ multiplier at 44~GiB (up to $2.29\times$ at favorable memory budgets). As for future work, an immediate next step is to extend these techniques to multi-GPU distributed MoE serving and support quantized expert formats such as GPTQ and AWQ.

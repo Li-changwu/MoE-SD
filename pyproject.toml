@@ -3,20 +3,19 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "vllm-moe-sd-scheduler"
+name = "briskmoe"
 version = "0.1.0"
-description = "Plugin-style scheduling framework for memory-constrained MoE + speculative decoding on vLLM"
+description = "BriskMoE: Restoring Speculative Speedups for Offloaded MoE Inference on vLLM"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-	"PyYAML>=6.0",
+	"vllm>=0.8.5",
+	"torch>=2.6.0",
+	"numpy>=2.0",
 ]
-
-[project.scripts]
-moe-sd-runtime = "vllm_moe_sd_scheduler.cli:main"
 
 [project.entry-points."vllm.general_plugins"]
 elmm = "adapters.vllm_elmm_plugin:register"
 
 [tool.setuptools]
-packages = ["adapters", "controllers", "collectors", "tools", "vllm_moe_sd_scheduler"]
+packages = ["adapters"]

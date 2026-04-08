@@ -118,6 +118,26 @@ class ELMMConfig:
     # Mainly benefits warmup / prefill (cold cache); during stale path the
     # cache is already populated so prefetch is a no-op.
     enable_oracle_prefetch: bool = True
+    # --- BriskMoE Integration ---
+    # Enable SACR (Speculation-Aware Cache Replacement) eviction policy.
+    enable_sacr: bool = False
+    # Enable ELP (Expert Lifecycle Partitioning) pin/flex zones.
+    enable_elp: bool = False
+    # Enable DIPP (Draft-Informed Prioritized Preloading) for prefetch.
+    enable_dipp: bool = False
+    # Enable PredCache (Predictive Expert Cache Management).
+    # Forward-looking eviction using router logits as Belady OPT approximation.
+    enable_pred_cache: bool = False
+    # PredCache LRU fallback weight (λ)
+    pred_cache_lru_weight: float = 10.0
+    # SACR alpha/beta/gamma weights
+    sacr_alpha: float = 0.3
+    sacr_beta: float = 0.2
+    sacr_gamma: float = 0.5
+    # ELP config
+    elp_pin_ratio: float = 0.7
+    elp_promotion_threshold: int = 5
+    elp_demotion_window: int = 50
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +157,8 @@ class _LayerExpertCache:
         "layer_name", "_slot_map", "_free_slots", "_lru_order",
         "_w13_pool", "_w2_pool", "_max_slots",
         "_evictions", "_hits", "_misses",
+        "_w13_scale_pool", "_w2_scale_pool",
+        "_w13_bias_pool", "_w2_bias_pool",
     )
 
     def __init__(
@@ -147,6 +169,12 @@ class _LayerExpertCache:
         w2_single_shape: tuple,
         dtype: torch.dtype,
         device: torch.device,
+        w13_scale_shape: tuple | None = None,
+        w2_scale_shape: tuple | None = None,
+        w13_bias_shape: tuple | None = None,
+        w2_bias_shape: tuple | None = None,
+        scale_dtype: torch.dtype | None = None,
+        bias_dtype: torch.dtype | None = None,
     ):
         self.layer_name = layer_name
         self._max_slots = max_slots
@@ -157,6 +185,29 @@ class _LayerExpertCache:
         self._w2_pool = torch.empty(
             (max_slots, *w2_single_shape), dtype=dtype, device=device
         )
+        # Optional scale/bias pools for quantized models (e.g. MXFP4 Marlin)
+        if w13_scale_shape is not None:
+            sdtype = scale_dtype or dtype
+            self._w13_scale_pool = torch.empty(
+                (max_slots, *w13_scale_shape), dtype=sdtype, device=device
+            )
+            self._w2_scale_pool = torch.empty(
+                (max_slots, *w2_scale_shape), dtype=sdtype, device=device
+            )
+        else:
+            self._w13_scale_pool = None
+            self._w2_scale_pool = None
+        if w13_bias_shape is not None:
+            bdtype = bias_dtype or dtype
+            self._w13_bias_pool = torch.empty(
+                (max_slots, *w13_bias_shape), dtype=bdtype, device=device
+            )
+            self._w2_bias_pool = torch.empty(
+                (max_slots, *w2_bias_shape), dtype=bdtype, device=device
+            )
+        else:
+            self._w13_bias_pool = None
+            self._w2_bias_pool = None
         # expert_id → slot_index
         self._slot_map: OrderedDict[int, int] = OrderedDict()
         # Available slot indices
@@ -186,6 +237,27 @@ class _LayerExpertCache:
         """Return (w13_view, w2_view) for the given slot index."""
         return self._w13_pool[slot], self._w2_pool[slot]
 
+    @property
+    def has_aux_pools(self) -> bool:
+        """True if this cache has scale/bias pools (quantized models)."""
+        return self._w13_scale_pool is not None or self._w13_bias_pool is not None
+
+    def get_slot_scale_tensors(
+        self, slot: int
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        """Return (w13_scale_view, w2_scale_view) or (None, None)."""
+        if self._w13_scale_pool is None:
+            return None, None
+        return self._w13_scale_pool[slot], self._w2_scale_pool[slot]
+
+    def get_slot_bias_tensors(
+        self, slot: int
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        """Return (w13_bias_view, w2_bias_view) or (None, None)."""
+        if self._w13_bias_pool is None:
+            return None, None
+        return self._w13_bias_pool[slot], self._w2_bias_pool[slot]
+
     def alloc_slot(self, expert_id: int) -> int:
         """Allocate a slot for this expert, evicting LRU if needed."""
         if expert_id in self._slot_map:
@@ -199,6 +271,27 @@ class _LayerExpertCache:
         slot = self._free_slots.pop()
         self._slot_map[expert_id] = slot
         return slot
+
+    def alloc_slot_with_victim(
+        self, expert_id: int, victim_eid: int | None = None
+    ) -> tuple[int, int | None]:
+        """Allocate with optional directed eviction. Returns (slot, evicted_eid)."""
+        if expert_id in self._slot_map:
+            self._slot_map.move_to_end(expert_id)
+            return self._slot_map[expert_id], None
+        evicted = None
+        if not self._free_slots:
+            if victim_eid is not None and victim_eid in self._slot_map:
+                evict_slot = self._slot_map.pop(victim_eid)
+                evicted = victim_eid
+            else:
+                # Fallback to LRU
+                evicted, evict_slot = self._slot_map.popitem(last=False)
+            self._free_slots.append(evict_slot)
+            self._evictions += 1
+        slot = self._free_slots.pop()
+        self._slot_map[expert_id] = slot
+        return slot, evicted
 
     def resize(self, new_max_slots: int) -> int:
         """
@@ -357,9 +450,6 @@ class ELMMManager:
         self._overlap_history: dict[str, list[float]] = {}
         # --- Temporal Locality Collection ---
         self._locality_analyzer: Optional[Any] = None
-        if self.config.enable_locality_collection:
-            from collectors.expert_locality_analyzer import ExpertTemporalLocalityAnalyzer
-            self._locality_analyzer = ExpertTemporalLocalityAnalyzer()
         self._verify_round_counter = 0
         self._current_round_experts: dict[str, set[int]] = {}
         # --- Adaptive Cache Budget ---
@@ -424,6 +514,29 @@ class ELMMManager:
         # Counters for prefetch effectiveness
         self._oracle_prefetch_issued: int = 0
         self._oracle_prefetch_skipped: int = 0
+        # Guard: only sync prefetch stream when work was actually issued
+        self._prefetch_in_flight: bool = False
+        # --- BriskMoE Integration ---
+        # Per-layer SACR eviction policies
+        self._briskmoe_sacr: Optional[Any] = None  # SACREvictionPolicy
+        # Per-layer ELP partitions (shared tracker with SACR)
+        self._briskmoe_elp: Optional[Any] = None  # ExpertLifecyclePartition
+        # DIPP preloader (shared across layers)
+        self._briskmoe_dipp: Optional[Any] = None  # DraftInformedPrioritizedPreloader
+        # PredCache manager (forward-looking eviction + prefetch)
+        self._pred_cache: Optional[Any] = None  # PredictiveExpertCacheManager
+        # Accept/Reject tracker (shared by SACR)
+        self._briskmoe_tracker: Optional[Any] = None  # AcceptRejectTracker
+        # Mapping layer_name → layer_id (int) for SACR/ELP
+        self._layer_name_to_id: dict[str, int] = {}
+        # BriskMoE step counter
+        self._briskmoe_step: int = 0
+        # --- Fused Remap (Phase 3 elimination) ---
+        # Per-layer dirty flag: True when cache was modified since last
+        # slow-path validation (prefetch/oracle/rebalance).  When False,
+        # the per-layer remap table is guaranteed valid and we can skip
+        # the safety check (.item() GPU→CPU sync) in the TASER fast path.
+        self._layer_cache_dirty: dict[str, bool] = {}
 
     # -----------------------------------------------------------------------
     # Installation
@@ -457,10 +570,12 @@ class ELMMManager:
             # Detect: if ANY param in this module was offloaded by
             # maybe_offload_to_cpu, then w13/w2 were also offloaded
             # (they just lost the attr due to replace_parameter).
+            # Also detect CPU-device weights (e.g. from Marlin conversion
+            # patch that moves converted weights to CPU-pinned memory).
             any_offloaded = any(
                 hasattr(p, "_vllm_offloaded_cpu_data")
                 for p in module.parameters()
-            )
+            ) or w13.device.type == "cpu" or w2.device.type == "cpu"
             if total_fused_moe <= 3:
                 print(f"[ELMM] FusedMoE #{total_fused_moe} '{name}': "
                       f"any_offloaded={any_offloaded}, "
@@ -495,13 +610,38 @@ class ELMMManager:
                 + w2[0].nelement() * w2[0].element_size()
             )
 
-            self._layer_meta[name] = {
+            meta: dict = {
                 "num_experts": num_experts,
                 "expert_size": expert_size,
                 "w13_shape": tuple(w13.shape),
                 "w2_shape": tuple(w2.shape),
                 "dtype": w13.dtype,
             }
+
+            # Detect per-expert quantization scales/biases (e.g. MXFP4 Marlin)
+            w13_scale = getattr(module, "w13_weight_scale", None)
+            w2_scale = getattr(module, "w2_weight_scale", None)
+            w13_bias = getattr(module, "w13_bias", None)
+            w2_bias = getattr(module, "w2_bias", None)
+
+            if w13_scale is not None and w13_scale.dim() >= 2:
+                meta["w13_scale_shape"] = tuple(w13_scale.shape)
+                meta["w2_scale_shape"] = tuple(w2_scale.shape)
+                meta["scale_dtype"] = w13_scale.dtype
+                expert_size += (
+                    w13_scale[0].nelement() * w13_scale[0].element_size()
+                    + w2_scale[0].nelement() * w2_scale[0].element_size()
+                )
+            if w13_bias is not None and w13_bias.dim() >= 2:
+                meta["w13_bias_shape"] = tuple(w13_bias.shape)
+                meta["w2_bias_shape"] = tuple(w2_bias.shape)
+                meta["bias_dtype"] = w13_bias.dtype
+                expert_size += (
+                    w13_bias[0].nelement() * w13_bias[0].element_size()
+                    + w2_bias[0].nelement() * w2_bias[0].element_size()
+                )
+            meta["expert_size"] = expert_size
+            self._layer_meta[name] = meta
 
             w13_bytes = w13.nelement() * w13.element_size()
             w2_bytes = w2.nelement() * w2.element_size()
@@ -545,6 +685,16 @@ class ELMMManager:
                 w2_single_shape=w2_single,
                 dtype=meta["dtype"],
                 device=device,
+                w13_scale_shape=meta.get("w13_scale_shape", (None,))[1:]
+                    if "w13_scale_shape" in meta else None,
+                w2_scale_shape=meta.get("w2_scale_shape", (None,))[1:]
+                    if "w2_scale_shape" in meta else None,
+                w13_bias_shape=meta.get("w13_bias_shape", (None,))[1:]
+                    if "w13_bias_shape" in meta else None,
+                w2_bias_shape=meta.get("w2_bias_shape", (None,))[1:]
+                    if "w2_bias_shape" in meta else None,
+                scale_dtype=meta.get("scale_dtype"),
+                bias_dtype=meta.get("bias_dtype"),
             )
             self._layer_caches[name] = cache
             total_cache_alloc += max_slots * expert_size
@@ -624,6 +774,84 @@ class ELMMManager:
         if self.config.enable_oracle_prefetch:
             print(f"[ELMM] Oracle prefetch enabled ({len(self._ordered_layers)} layers)",
                   file=sys.stderr, flush=True)
+        # --- BriskMoE: Initialize SACR + ELP + DIPP ---
+        # Build layer_name → layer_id mapping
+        for name in self._layer_caches:
+            parts = name.split(".")
+            layer_id = 0
+            for i, p in enumerate(parts):
+                if p == "layers" and i + 1 < len(parts):
+                    try:
+                        layer_id = int(parts[i + 1])
+                    except ValueError:
+                        pass
+            self._layer_name_to_id[name] = layer_id
+
+        if self.config.enable_sacr:
+            from adapters.accept_reject_tracker import AcceptRejectTracker
+            from adapters.sacr import SACRConfig, SACREvictionPolicy
+            self._briskmoe_tracker = AcceptRejectTracker()
+            sacr_config = SACRConfig(
+                alpha=self.config.sacr_alpha,
+                beta=self.config.sacr_beta,
+                gamma=self.config.sacr_gamma,
+                adaptive_gamma=True,
+            )
+            max_experts = max(m["num_experts"] for m in self._layer_meta.values())
+            self._briskmoe_sacr = SACREvictionPolicy(
+                config=sacr_config, tracker=self._briskmoe_tracker,
+                num_experts=max_experts,
+            )
+            print(f"[ELMM] BriskMoE SACR enabled (α={sacr_config.alpha}, "
+                  f"β={sacr_config.beta}, γ={sacr_config.gamma}, adaptive=True)",
+                  file=sys.stderr, flush=True)
+
+        if self.config.enable_elp:
+            from adapters.elp import ELPConfig, ExpertLifecyclePartition
+            # Use per-layer slot count for ELP total_slots
+            sample_slots = list(self._layer_caches.values())[0]._max_slots
+            elp_config = ELPConfig(
+                pin_ratio=self.config.elp_pin_ratio,
+                promotion_threshold=self.config.elp_promotion_threshold,
+                demotion_window=self.config.elp_demotion_window,
+            )
+            max_experts_elp = max(m["num_experts"] for m in self._layer_meta.values())
+            self._briskmoe_elp = ExpertLifecyclePartition(
+                config=elp_config, total_slots=sample_slots,
+                num_experts=max_experts_elp,
+            )
+            print(f"[ELMM] BriskMoE ELP enabled (pin_ratio={elp_config.pin_ratio}, "
+                  f"threshold={elp_config.promotion_threshold}, slots={sample_slots})",
+                  file=sys.stderr, flush=True)
+
+        if self.config.enable_dipp:
+            from adapters.dipp import DIPPConfig, DraftInformedPrioritizedPreloader
+            dipp_config = DIPPConfig()
+            self._briskmoe_dipp = DraftInformedPrioritizedPreloader(config=dipp_config)
+            print(f"[ELMM] BriskMoE DIPP enabled (max_prefetch={dipp_config.max_prefetch_experts})",
+                  file=sys.stderr, flush=True)
+
+        if self.config.enable_pred_cache:
+            from adapters.pred_cache import PredCacheConfig, PredictiveExpertCacheManager
+            max_experts_pc = max(m["num_experts"] for m in self._layer_meta.values())
+            sample_top_k = list(self._layer_meta.values())[0].get("top_k", 8)
+            pc_config = PredCacheConfig(
+                num_experts=max_experts_pc,
+                top_k=sample_top_k,
+                lru_fallback_weight=self.config.pred_cache_lru_weight,
+            )
+            self._pred_cache = PredictiveExpertCacheManager(config=pc_config)
+            print(f"[ELMM] BriskMoE PredCache enabled "
+                  f"(num_experts={max_experts_pc}, top_k={sample_top_k}, "
+                  f"λ={pc_config.lru_fallback_weight})",
+                  file=sys.stderr, flush=True)
+
+        # Check if any layer has quant aux pools
+        has_aux = any(c.has_aux_pools for c in self._layer_caches.values())
+        if has_aux:
+            print("[ELMM] Scale/bias pools enabled (quantized model detected)",
+                  file=sys.stderr, flush=True)
+
         msg = (
             f"ELMM installed: {num_layers} offloaded layers, "
             f"scratchpad={scratch_mb:.0f} MB, "
@@ -886,17 +1114,41 @@ class ELMMManager:
         # Launch async H2D on prefetch stream (PCIe, not HBM)
         stream.wait_stream(torch.cuda.current_stream())
         count = 0
+        next_remap_tbl = self._layer_remap.get(next_name)
         with torch.cuda.stream(stream):
             for eid in to_prefetch:
                 if count >= free_slots:
                     break
                 if next_cache.contains(eid):
                     continue
+                # If cache is full, eviction will happen — zero the
+                # evicted expert's remap so TASER's has_unmapped catches it.
+                if (not next_cache._free_slots
+                        and eid not in next_cache._slot_map):
+                    evict_eid = next(iter(next_cache._slot_map))
+                    if next_remap_tbl is not None:
+                        next_remap_tbl[evict_eid] = 0
                 slot = next_cache.alloc_slot(eid)
                 pool_w13, pool_w2 = next_cache.get_slot_tensors(slot)
                 pool_w13.copy_(w13_ref[eid], non_blocking=True)
                 pool_w2.copy_(w2_ref[eid], non_blocking=True)
+                if next_cache.has_aux_pools:
+                    s13, s2 = next_cache.get_slot_scale_tensors(slot)
+                    b13, b2 = next_cache.get_slot_bias_tensors(slot)
+                    if s13 is not None:
+                        s13.copy_(next_module.w13_weight_scale[eid], non_blocking=True)
+                        s2.copy_(next_module.w2_weight_scale[eid], non_blocking=True)
+                    if b13 is not None:
+                        b13.copy_(next_module.w13_bias[eid], non_blocking=True)
+                        b2.copy_(next_module.w2_bias[eid], non_blocking=True)
+                # Update the per-layer remap table for the prefetched expert
+                if next_remap_tbl is not None:
+                    next_remap_tbl[eid] = slot
                 count += 1
+        if count > 0:
+            self._prefetch_in_flight = True
+            # Mark NEXT layer dirty (its cache was modified)
+            self._layer_cache_dirty[next_name] = True
         self._oracle_prefetch_issued += count
 
     # -----------------------------------------------------------------------
@@ -964,6 +1216,15 @@ class ELMMManager:
                 pool_w13, pool_w2 = cache.get_slot_tensors(new_slot)
                 pool_w13.copy_(w13_ref[eid], non_blocking=True)
                 pool_w2.copy_(w2_ref[eid], non_blocking=True)
+                if cache.has_aux_pools:
+                    s13, s2 = cache.get_slot_scale_tensors(new_slot)
+                    b13, b2 = cache.get_slot_bias_tensors(new_slot)
+                    if s13 is not None:
+                        s13.copy_(module.w13_weight_scale[eid], non_blocking=True)
+                        s2.copy_(module.w2_weight_scale[eid], non_blocking=True)
+                    if b13 is not None:
+                        b13.copy_(module.w13_bias[eid], non_blocking=True)
+                        b2.copy_(module.w2_bias[eid], non_blocking=True)
                 new_slots.append(new_slot)
 
             # Clear GPU mapping for evicted experts
@@ -1083,12 +1344,12 @@ class ELMMManager:
         self._maybe_profile_end(p_tok)
         p_tok = self._maybe_profile_start("P3_cache")
 
-        # Sync any in-flight Oracle prefetch copies before accessing cache.
-        # Oracle launches async H2D on _prefetch_stream; without this wait,
-        # Phase 3 could see a slot as "cached" while data is still copying.
-        if (self.config.enable_oracle_prefetch
-                and self._prefetch_stream is not None):
+        # Sync any in-flight prefetch copies (draft or oracle) before
+        # accessing cache.  Without this wait, Phase 3 could see a slot
+        # as "cached" while data is still copying on _prefetch_stream.
+        if self._prefetch_in_flight and self._prefetch_stream is not None:
             torch.cuda.current_stream().wait_stream(self._prefetch_stream)
+            self._prefetch_in_flight = False
 
         use_pool_direct = (
             self.config.enable_pool_direct and self._remap_table is not None
@@ -1106,18 +1367,28 @@ class ELMMManager:
             step = self._layer_remap_step[layer_name]
             next_val = self._layer_next_validation.get(layer_name, 0)
             if step >= self.config.stale_remap_warmup and step != next_val:
-                # FAST PATH: no unique, no tolist, no dict lookup, no sync!
-                remapped_ids = self._layer_remap[layer_name][topk_ids]
-                step_hits = 0  # stats unavailable in fast path
-                step_misses = 0
-                stale_remap_ok = True
-                # --- ALPS Phase 1: lazy CUDA Graph capture ---
-                # On the first stale-path invocation per layer,
-                # capture the Direct Dispatch as a CUDA Graph.
-                if (self._use_cuda_graph
-                        and layer_name not in self._layer_graphs):
-                    self._try_capture_layer_graph(
-                        layer_name, hidden_states, topk_weights, remapped_ids)
+                # Check dirty flag: if cache was modified since last
+                # validation, fall through to slow path (safe).
+                if self._layer_cache_dirty.get(layer_name, False):
+                    # Cache modified by prefetch/oracle/rebalance →
+                    # force validation to rebuild remap table.
+                    pass
+                else:
+                    # FAST PATH: remap table guaranteed valid.
+                    # No GPU→CPU sync needed — skip .item() safety check.
+                    lr = self._layer_remap[layer_name]
+                    remapped_ids = lr[topk_ids]
+                    step_hits = 0  # stats unavailable in fast path
+                    step_misses = 0
+                    stale_remap_ok = True
+                    # --- ALPS Phase 1: lazy CUDA Graph capture ---
+                    # On the first stale-path invocation per layer,
+                    # capture the Direct Dispatch as a CUDA Graph.
+                    if (self._use_cuda_graph
+                            and self.config.enable_direct_dispatch
+                            and layer_name not in self._layer_graphs):
+                        self._try_capture_layer_graph(
+                            layer_name, hidden_states, topk_weights, remapped_ids)
             self._layer_remap_step[layer_name] = step + 1
 
         if not stale_remap_ok:
@@ -1142,6 +1413,7 @@ class ELMMManager:
 
             if not use_gpu_cache:
                 # === Original CPU-Side Cache Path ===
+                p3a_tok = self._maybe_profile_start("P3a_sync")
                 unique_experts = topk_ids.reshape(-1).unique()
                 unique_list = unique_experts.tolist()
                 unique_set = set(unique_list)
@@ -1191,16 +1463,116 @@ class ELMMManager:
                 step_hits = len(hit_eids)
                 step_misses = len(miss_eids)
                 pcie_bytes = step_misses * meta["expert_size"]
+                self._maybe_profile_end(p3a_tok)
 
                 # Handle cache misses: copy UVA → pool slot
+                p3b_tok = self._maybe_profile_start("P3b_load")
                 miss_slots: list[int] = []
+                use_sacr = self._briskmoe_sacr is not None
+                use_elp = self._briskmoe_elp is not None
+                use_briskmoe = use_sacr or use_elp
+                use_pred_cache = self._pred_cache is not None
+                layer_id = self._layer_name_to_id.get(layer_name, 0)
+
+                # BriskMoE: record accesses for ALL touched experts (hits+misses)
+                # Fused batch call — single loop over unique_list instead of two
+                if use_sacr:
+                    self._briskmoe_sacr.record_access_batch(
+                        layer_id, unique_list, self._briskmoe_step
+                    )
+                    # Feed hit rate to SACR for adaptive γ
+                    step_total = step_hits + step_misses
+                    if step_total > 0:
+                        self._briskmoe_sacr.update_hit_rate(
+                            layer_id, step_hits / step_total
+                        )
+                if use_elp:
+                    self._briskmoe_elp.access_batch(
+                        layer_id, unique_list, self._briskmoe_step
+                    )
+                if use_pred_cache:
+                    self._pred_cache.record_access_batch(layer_id, unique_list)
+                    # Update demand with current routing (predicts next step
+                    # via EMA — no extra .tolist() needed since we reuse unique_list)
+                    self._pred_cache.update_predictions_from_flat(layer_id, unique_list)
+
                 for eid in miss_eids:
-                    new_slot = cache.alloc_slot(eid)
+                    if use_briskmoe and not cache._free_slots and eid not in cache._slot_map:
+                        if use_pred_cache:
+                            # PredCache: LRU with demand-aware protection.
+                            # Iterate cache in LRU order, skip experts with
+                            # predicted demand. Falls back to pure LRU if all
+                            # candidates have demand (or no predictions yet).
+                            pc = self._pred_cache
+                            victim = None
+                            for k in cache._slot_map:
+                                if k in unique_set:
+                                    continue  # need this step
+                                if pc._get_demand(layer_id, k) <= 0.0:
+                                    victim = k
+                                    break
+                            if victim is None:
+                                # All candidates have demand → fall back to LRU
+                                for k in cache._slot_map:
+                                    if k not in unique_set:
+                                        victim = k
+                                        break
+                            if victim is None:
+                                victim = next(iter(cache._slot_map))
+                        elif use_elp:
+                            # BriskMoE victim selection (SACR/ELP path)
+                            candidates = self._briskmoe_elp.get_flex_candidates(layer_id)
+                            candidates = [c for c in candidates if c in cache._slot_map]
+                            if not candidates:
+                                candidates = list(cache._slot_map.keys())
+
+                            if use_sacr:
+                                victim = self._briskmoe_sacr.select_victim(layer_id, candidates)
+                            else:
+                                # ELP-only: pick LRU among candidates
+                                cand_set = set(candidates)
+                                victim = None
+                                for k in cache._slot_map:
+                                    if k in cand_set:
+                                        victim = k
+                                        break
+                                if victim is None:
+                                    victim = candidates[0]
+                        else:
+                            # SACR-only path
+                            candidates = list(cache._slot_map.keys())
+                            victim = self._briskmoe_sacr.select_victim(layer_id, candidates)
+
+                        new_slot, evicted = cache.alloc_slot_with_victim(eid, victim)
+                        if evicted is not None:
+                            if use_sacr:
+                                self._briskmoe_sacr.remove_expert(layer_id, evicted)
+                            if use_elp:
+                                self._briskmoe_elp.remove_expert(layer_id, evicted)
+                    else:
+                        new_slot = cache.alloc_slot(eid)
                     pool_w13, pool_w2 = cache.get_slot_tensors(new_slot)
                     pool_w13.copy_(w13_ref[eid], non_blocking=True)
                     pool_w2.copy_(w2_ref[eid], non_blocking=True)
+                    if cache.has_aux_pools:
+                        s13, s2 = cache.get_slot_scale_tensors(new_slot)
+                        b13, b2 = cache.get_slot_bias_tensors(new_slot)
+                        if s13 is not None:
+                            s13.copy_(module.w13_weight_scale[eid], non_blocking=True)
+                            s2.copy_(module.w2_weight_scale[eid], non_blocking=True)
+                        if b13 is not None:
+                            b13.copy_(module.w13_bias[eid], non_blocking=True)
+                            b2.copy_(module.w2_bias[eid], non_blocking=True)
                     miss_slots.append(new_slot)
 
+                # BriskMoE: periodic ELP rebalance
+                if (self._briskmoe_elp is not None
+                        and self._briskmoe_step % self._briskmoe_elp.config.rebalance_interval == 0):
+                    self._briskmoe_elp.rebalance(layer_id)
+
+                self._maybe_profile_end(p3b_tok)
+
+                p3c_tok = self._maybe_profile_start("P3c_copy")
                 if use_pool_direct:
                     remap = self._remap_table
                     all_eids = hit_eids + miss_eids
@@ -1217,9 +1589,16 @@ class ELMMManager:
                     # Persist to per-layer remap for stale-remap mode
                     if sri > 0 and layer_name in self._layer_remap:
                         lr = self._layer_remap[layer_name]
-                        lr.fill_(0)  # safe default (slot 0 always valid)
-                        if all_eids:
-                            lr.scatter_(0, eid_t, slot_t)
+                        # Rebuild remap from the full cache slot_map, not
+                        # just the current step's experts.  This ensures
+                        # that stale-path lookups for ANY cached expert
+                        # return the correct slot (not the default slot 0
+                        # which could hold a different expert's weights).
+                        lr.fill_(0)
+                        for cached_eid, cached_slot in cache._slot_map.items():
+                            lr[cached_eid] = cached_slot
+                        # Remap rebuilt from ground truth → cache is clean
+                        self._layer_cache_dirty[layer_name] = False
                         # --- TASER adaptive interval update ---
                         # Compare with previous expert set: if unchanged,
                         # grow interval (routing stable); if changed, shrink.
@@ -1246,6 +1625,7 @@ class ELMMManager:
                         pool_w13, pool_w2 = cache.get_slot_tensors(slot)
                         scratch_w13[eid].copy_(pool_w13, non_blocking=True)
                         scratch_w2[eid].copy_(pool_w2, non_blocking=True)
+                self._maybe_profile_end(p3c_tok)
 
                 self._total_cache_hits += step_hits
                 self._total_cache_misses += step_misses
@@ -1319,25 +1699,58 @@ class ELMMManager:
                 # === Original path via quant_method.apply ===
                 orig_w13_data = module.w13_weight.data
                 orig_w2_data = module.w2_weight.data
+                orig_w13_scale = None
+                orig_w2_scale = None
+                orig_w13_bias = None
+                orig_w2_bias = None
 
                 if use_pool_direct:
                     module.w13_weight.data = cache._w13_pool
                     module.w2_weight.data = cache._w2_pool
+                    # Swap scale/bias pools for quantized models
+                    if cache._w13_scale_pool is not None:
+                        orig_w13_scale = module.w13_weight_scale.data
+                        orig_w2_scale = module.w2_weight_scale.data
+                        module.w13_weight_scale.data = cache._w13_scale_pool
+                        module.w2_weight_scale.data = cache._w2_scale_pool
+                    if cache._w13_bias_pool is not None:
+                        orig_w13_bias = module.w13_bias.data
+                        orig_w2_bias = module.w2_bias.data
+                        module.w13_bias.data = cache._w13_bias_pool
+                        module.w2_bias.data = cache._w2_bias_pool
                     kernel_topk_ids = remapped_ids
+                    # Match vLLM expert_cache.py: adjust global_num_experts
+                    # so moe_align_block_size uses pool slot count instead
+                    # of full expert count (128).  Use the PHYSICAL pool
+                    # size (w13_pool.shape[0]) rather than the logical
+                    # _max_slots, because adaptive rebalancing can shrink
+                    # _max_slots below slot indices that TASER stale remap
+                    # already references.  The physical pool never resizes.
+                    orig_num_experts = module.global_num_experts
+                    module.global_num_experts = cache._w13_pool.shape[0]
                 else:
                     module.w13_weight.data = scratch_w13
                     module.w2_weight.data = scratch_w2
                     kernel_topk_ids = topk_ids
 
-                final_hidden = module.quant_method.apply(
-                    layer=module,
-                    x=hidden_states,
-                    topk_weights=topk_weights,
-                    topk_ids=kernel_topk_ids,
-                )
-
-                module.w13_weight.data = orig_w13_data
-                module.w2_weight.data = orig_w2_data
+                try:
+                    final_hidden = module.quant_method.apply(
+                        layer=module,
+                        x=hidden_states,
+                        topk_weights=topk_weights,
+                        topk_ids=kernel_topk_ids,
+                    )
+                finally:
+                    module.w13_weight.data = orig_w13_data
+                    module.w2_weight.data = orig_w2_data
+                    if orig_w13_scale is not None:
+                        module.w13_weight_scale.data = orig_w13_scale
+                        module.w2_weight_scale.data = orig_w2_scale
+                    if orig_w13_bias is not None:
+                        module.w13_bias.data = orig_w13_bias
+                        module.w2_bias.data = orig_w2_bias
+                    if use_pool_direct:
+                        module.global_num_experts = orig_num_experts
 
         # --- Phase 5: Shared experts ---
         self._maybe_profile_end(p_tok)
@@ -1370,6 +1783,12 @@ class ELMMManager:
                   f"replay={self._graph_replay_count}, eager={self._graph_eager_count}, "
                   f"ratio={pct:.1f}%, M_captured={self._graph_M}",
                   file=sys.stderr, flush=True)
+
+        # BriskMoE: advance step counter (once per layer per forward pass)
+        if self._briskmoe_sacr is not None or self._briskmoe_elp is not None:
+            self._briskmoe_step += 1
+        if self._pred_cache is not None:
+            self._pred_cache.advance_step()
 
         return final_hidden
 
@@ -1567,16 +1986,60 @@ class ELMMManager:
         if layer_name not in self._pending_prefetch:
             self._pending_prefetch[layer_name] = set()
 
+        remap_tbl = self._layer_remap.get(layer_name)
+        use_briskmoe = self._briskmoe_sacr is not None
+        layer_id = self._layer_name_to_id.get(layer_name, 0)
         with torch.cuda.stream(stream):
             for eid in expert_ids:
                 if cache.contains(eid):
                     continue
-                # Allocate a cache slot and H2D copy from UVA weight
-                slot = cache.alloc_slot(eid)
+                # If cache is full, eviction will happen — update remap
+                # so TASER's has_unmapped check detects the evicted expert.
+                if not cache._free_slots and eid not in cache._slot_map:
+                    if use_briskmoe:
+                        # BriskMoE victim selection for prefetch eviction
+                        if self._briskmoe_elp is not None:
+                            candidates = self._briskmoe_elp.get_flex_candidates(layer_id)
+                            candidates = [c for c in candidates if c in cache._slot_map]
+                            if not candidates:
+                                candidates = list(cache._slot_map.keys())
+                        else:
+                            candidates = list(cache._slot_map.keys())
+                        victim = self._briskmoe_sacr.select_victim(layer_id, candidates)
+                        if remap_tbl is not None:
+                            remap_tbl[victim] = 0
+                        slot, evicted = cache.alloc_slot_with_victim(eid, victim)
+                        if evicted is not None:
+                            self._briskmoe_sacr.remove_expert(layer_id, evicted)
+                            if self._briskmoe_elp is not None:
+                                self._briskmoe_elp.remove_expert(layer_id, evicted)
+                    else:
+                        evict_eid = next(iter(cache._slot_map))
+                        if remap_tbl is not None:
+                            remap_tbl[evict_eid] = 0
+                        # Allocate a cache slot and H2D copy from UVA weight
+                        slot = cache.alloc_slot(eid)
+                else:
+                    slot = cache.alloc_slot(eid)
                 pool_w13, pool_w2 = cache.get_slot_tensors(slot)
                 pool_w13.copy_(module.w13_weight[eid], non_blocking=True)
                 pool_w2.copy_(module.w2_weight[eid], non_blocking=True)
+                if cache.has_aux_pools:
+                    s13, s2 = cache.get_slot_scale_tensors(slot)
+                    b13, b2 = cache.get_slot_bias_tensors(slot)
+                    if s13 is not None:
+                        s13.copy_(module.w13_weight_scale[eid], non_blocking=True)
+                        s2.copy_(module.w2_weight_scale[eid], non_blocking=True)
+                    if b13 is not None:
+                        b13.copy_(module.w13_bias[eid], non_blocking=True)
+                        b2.copy_(module.w2_bias[eid], non_blocking=True)
+                # Update remap for newly loaded expert
+                if remap_tbl is not None:
+                    remap_tbl[eid] = slot
                 self._pending_prefetch[layer_name].add(eid)
+        self._prefetch_in_flight = True
+        # Mark layer dirty so TASER skips the fast path and validates
+        self._layer_cache_dirty[layer_name] = True
 
     def prefetch_for_draft_routing(
         self,
@@ -1710,6 +2173,8 @@ class ELMMManager:
             target = new_allocations.get(name, cache._max_slots)
             if target != cache._max_slots:
                 cache.resize(target)
+                # Mark dirty — remap table may reference evicted slots
+                self._layer_cache_dirty[name] = True
                 resized += 1
 
         if resized > 0:
@@ -1855,11 +2320,13 @@ class ELMMManager:
         return stats
 
     def log_stats(self):
+        import sys
         s = self.get_stats()
-        logger.info(
-            f"ELMM step={s['total_intercepts']}: "
+        print(
+            f"[ELMM] step={s['total_intercepts']}: "
             f"hit_rate={s['overall_hit_rate']:.1%}, "
-            f"PCIe={s['total_pcie_MB']:.0f}MB"
+            f"PCIe={s['total_pcie_MB']:.0f}MB",
+            file=sys.stderr, flush=True,
         )
 
     # -----------------------------------------------------------------------
@@ -1871,9 +2338,13 @@ class ELMMManager:
         if not self._installed:
             return
 
-        # Export locality data before cleanup
-        if self.config.locality_export_dir and self._verify_round_counter > 0:
+        # Always export final stats on shutdown
+        if self.config.locality_export_dir:
             self.export_locality_data()
+
+        # Also export if verify rounds were collected
+        if not self.config.locality_export_dir and self._verify_round_counter > 0:
+            pass  # no export dir configured
 
         # Restore original forward_impl on each patched module
         for name, module in self._patched_modules.items():

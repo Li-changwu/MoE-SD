@@ -73,6 +73,9 @@ class DraftPrefetchHook:
         """
         Called after each draft proposal. Triggers selective prefetch
         based on temporal locality — only for layers with low cache hit rates.
+
+        When DIPP is enabled on the ELMM manager, uses value-based priority
+        scheduling instead of simple last-step locality.
         """
         self._draft_rounds += 1
 
@@ -84,6 +87,70 @@ class DraftPrefetchHook:
         if self._draft_rounds % 3 != 0:
             return
 
+        # === PredCache path: demand-prioritized prefetch scheduling ===
+        if elmm._pred_cache is not None and elmm._briskmoe_dipp is None:
+            pred_cache = elmm._pred_cache
+            # Build cache state for each layer
+            cache_states: dict[int, set[int]] = {}
+            for layer_name, cache in elmm._layer_caches.items():
+                layer_id = elmm._layer_name_to_id.get(layer_name, 0)
+                cache_states[layer_id] = set(cache._slot_map.keys())
+
+            num_layers = len(elmm._layer_caches)
+            schedule = pred_cache.compute_prefetch_schedule(
+                cache_states, num_layers
+            )
+
+            if schedule:
+                id_to_name = {v: k for k, v in elmm._layer_name_to_id.items()}
+                for layer_id, eid, _priority in schedule:
+                    layer_name = id_to_name.get(layer_id)
+                    if layer_name:
+                        elmm.prefetch_experts(layer_name, [eid])
+            return
+
+        # === DIPP path: value-based prefetch scheduling ===
+        # When PredCache is also enabled, DIPP's Value is enhanced with
+        # EMA demand signal: hot experts get priority over one-off misses.
+        if elmm._briskmoe_dipp is not None:
+            dipp = elmm._briskmoe_dipp
+            # Build predictions: {layer_id: {token_pos=0: [expert_ids]}}
+            # Use last step's expert set as surrogate for draft predictions
+            predictions: dict[int, dict[int, list[int]]] = {}
+            cache_state: dict[int, set[int]] = {}
+            for layer_name, last_experts in elmm._last_expert_set.items():
+                layer_id = elmm._layer_name_to_id.get(layer_name, 0)
+                if last_experts:
+                    predictions[layer_id] = {0: list(last_experts)}
+                cache = elmm._layer_caches.get(layer_name)
+                if cache:
+                    cache_state[layer_id] = set(cache._slot_map.keys())
+
+            if predictions:
+                schedule = dipp.compute_schedule(predictions, cache_state)
+                # Enhance DIPP with PredCache EMA demand if available.
+                # Re-score each entry: V' = V × (1 + ema_demand) so hot
+                # experts are prefetched before one-off misses.
+                pred_cache = elmm._pred_cache
+                if pred_cache is not None and schedule:
+                    boosted: list[tuple[float, int, int]] = []
+                    for layer_id, eid, val in schedule:
+                        d = pred_cache.get_demand_boost(layer_id, eid)
+                        boosted.append((val * (1.0 + d), layer_id, eid))
+                    boosted.sort(reverse=True)
+                    schedule = [
+                        (lid, eid, v) for v, lid, eid in boosted
+                    ]
+                # Build layer_id → layer_name reverse mapping
+                id_to_name = {v: k for k, v in elmm._layer_name_to_id.items()}
+                for layer_id, eid, _val in schedule:
+                    layer_name = id_to_name.get(layer_id)
+                    if layer_name:
+                        elmm.prefetch_experts(layer_name, [eid])
+                dipp.reset_round()
+            return
+
+        # === Legacy path: locality-based prefetch ===
         # Select only layers with low hit rates (where prefetch is valuable)
         # Limit to at most 5 layers per draft round to cap PCIe usage
         layer_scores = []

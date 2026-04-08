@@ -1,11 +1,12 @@
+# BriskMoE dependencies
+# Core runtime
 vllm==0.8.5
 torch==2.6.0
-transformers==4.51.0
-flash-attn==2.7.4.post1
-numpy==2.2.4
-pandas==2.2.3
-pyarrow==19.0.1
-matplotlib==3.10.1
-seaborn==0.13.2
-PyYAML==6.0.2
-requests==2.32.3
+speculators>=0.4.0
+numpy>=2.0
+
+# Plotting (for benchmark visualization scripts)
+matplotlib>=3.8
+
+# Testing
+pytest>=7.0
