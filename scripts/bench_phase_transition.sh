@@ -29,13 +29,26 @@ RESULT_DIR="results/phase_transition"
 OUTPUT_LEN=128
 NUM_PROMPTS=10
 WARMUP=3
-GPU_MEM=0.92
+GPU_MEM=0.90              # KEEP CONSTANT — not a sweep variable!
 MAX_MODEL_LEN=4096
 DTYPE="bfloat16"
-SPEC_DEPTH=3            # EAGLE-3 speculative tokens (K)
+SPEC_DEPTH=3              # EAGLE-3 speculative tokens (K)
 
+# ---------------------------------------------------------------------------
+# Experiment design note:
+#   Independent variable  = cpu_offload_gb  (precise control of offloading)
+#   Control variable      = gpu_memory_utilization (kept FIXED at 0.90)
+#
+#   Why NOT sweep gpu_memory_utilization?
+#     Because it also controls KV-cache budget — a confounding variable.
+#     cpu_offload_gb only moves model weights to CPU; KV-cache is unaffected.
+#
+#   A100 80 GB: model (57 GB) fits entirely → sweep 0..45 (full range)
+#   A6000 48 GB: must offload ≥ 15 GB → sweep 15..45
+# ---------------------------------------------------------------------------
 # Sweep: cpu_offload_gb values (ascending = more offloading)
-OFFLOAD_VALUES=(20 25 30 35 40 45)
+# On A100 80 GB, start from 0 (everything on GPU = ideal baseline)
+OFFLOAD_VALUES=(0 10 20 30 35 40 45)
 
 # Safety
 TIMEOUT=3600             # max seconds per single benchmark run
@@ -139,7 +152,7 @@ python3 << 'PYEOF'
 import json, os
 
 result_dir = "results/phase_transition"
-offloads = [20, 25, 30, 35, 40, 45]
+offloads = [0, 10, 20, 30, 35, 40, 45]
 model_size_gb = 57.0  # approximate BF16 size
 
 header = f"{'Offload':>8} {'GPU%':>6} {'AR TPS':>8} {'SD TPS':>8} {'Speedup':>8} {'AR PCIe':>10} {'SD PCIe':>10}"
