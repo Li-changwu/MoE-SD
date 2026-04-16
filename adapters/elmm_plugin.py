@@ -24,7 +24,9 @@ This module is activated from the vLLM server launch script by calling
 ``activate_elmm()`` after model loading in the GPU worker process.
 """
 
+import contextlib
 import logging
+import os
 import threading
 import time
 from collections import OrderedDict
@@ -118,6 +120,49 @@ class ELMMConfig:
     # Mainly benefits warmup / prefill (cold cache); during stale path the
     # cache is already populated so prefetch is a no-op.
     enable_oracle_prefetch: bool = True
+    # --- HFDE (Hit-First Disaggregated Execution) ---
+    # When cache misses occur, split MoE execution into two passes:
+    #   Pass 1 (hit): compute cached experts while miss experts load async
+    #   Pass 2 (miss): compute miss experts after loading completes
+    # Overlaps PCIe miss-loading with hit-expert GPU compute.
+    # Requires pool_direct + direct_dispatch.  Only activates when there
+    # are both hits AND misses (common during TASER validation steps).
+    enable_hfde: bool = True
+    # --- Stacked Gating Predictor (P1) ---
+    # Build inter-layer co-activation frequency tables during warmup,
+    # then use Layer N's actual routing to predict Layer N+1's experts.
+    # Replaces the naive cache-overlap heuristic in oracle prefetch.
+    enable_stacked_gating: bool = True
+    # Top-K co-activated experts to predict per source expert.
+    stacked_gating_top_k: int = 4
+    # --- RWAWE Eviction (P2) ---
+    # Replace pure LRU with Recency-Weighted Access-Weighted Eviction.
+    # Score(e) = alpha * exp(-lambda * age) + (1-alpha) * ema_freq(e)
+    # Evicts lowest-score expert instead of least-recently-used.
+    enable_rwawe: bool = True
+    rwawe_alpha: float = 0.6   # weight toward recency (0-1)
+    rwawe_lambda: float = 0.1  # recency exponential decay rate
+    rwawe_beta: float = 0.05   # EMA frequency update coefficient
+    # --- Draft-Utility Signal (P3) ---
+    # Weight RWAWE frequency updates by per-expert utility: experts activated
+    # by more verify tokens get higher frequency boost (proxy for accept likelihood).
+    enable_draft_utility: bool = True
+    # --- Entropy-Aware Budget (P4) ---
+    # Weight rebalance allocation by per-layer routing entropy (unique experts EMA).
+    # High-entropy layers get proportionally more cache slots.
+    enable_entropy_budget: bool = True
+    entropy_ema_gamma: float = 0.05  # EMA coefficient for unique experts tracking
+    entropy_kappa: float = 1.0       # entropy influence exponent
+    # --- TASER v2: Dual-Rail Hot Expert Routing ---
+    # Tolerate partial misses in cruise mode by splitting execution into
+    # hit (pool-direct) and miss (HFDE async) passes.
+    taser_miss_budget_ratio: float = 0.15   # max miss ratio per step in cruise
+    taser_converge_threshold: float = 0.90  # cache-hot_set alignment to enter cruise
+    taser_converge_max_steps: int = 10      # max steps in converge before force cruise
+    taser_drift_ema_alpha: float = 0.1      # EMA smoothing for miss ratio
+    taser_drift_miss_threshold: float = 0.3 # miss ratio EMA triggering drift
+    taser_drift_warmup: int = 10            # re-warmup steps during drift
+    taser_cold_slots: int = 3               # reserved slots for miss experts in cruise
     # --- BriskMoE Integration ---
     # Enable SACR (Speculation-Aware Cache Replacement) eviction policy.
     enable_sacr: bool = False
@@ -130,6 +175,13 @@ class ELMMConfig:
     enable_pred_cache: bool = False
     # PredCache LRU fallback weight (λ)
     pred_cache_lru_weight: float = 10.0
+    # --- ACES (Adaptive Cache with Expert Scoring) ---
+    # Use router softmax EMA as eviction signal instead of LRU.
+    enable_aces: bool = False
+    aces_beta: float = 0.9  # EMA momentum
+    # ACES-guided TASER mapping: use EMA top-K to build remap table
+    # at validation time, proactively swapping in high-EMA experts.
+    aces_taser: bool = False
     # SACR alpha/beta/gamma weights
     sacr_alpha: float = 0.3
     sacr_beta: float = 0.2
@@ -138,6 +190,26 @@ class ELMMConfig:
     elp_pin_ratio: float = 0.7
     elp_promotion_threshold: int = 5
     elp_demotion_window: int = 50
+    # --- Unified Scheduling Framework (D1-D6) ---
+    # Master switch: enables partial-resident experts + unified pipeline.
+    # When True, bypasses TASER/HFDE/BriskMoE and uses D1-D6 pipeline.
+    enable_unified_scheduling: bool = False
+    # D3: Expert split ratio θ (head portion of intermediate dimension)
+    unified_split_ratio: float = 0.4
+    # D4: Tail pool slots per layer
+    unified_tail_slots: int = 8
+    # D4: GPU budget for D4 pools (bytes). 0 = auto-detect from free memory.
+    unified_budget_bytes: int = 0
+    # D1: Governor mode ("rule" | "fixed")
+    unified_governor_mode: str = "rule"
+    # D1: Speculation depth bounds
+    unified_K_min: int = 1
+    unified_K_max: int = 5
+    unified_K_default: int = 3
+    # D2: Verify decomposition pattern ("auto" | "2+2" | "none" etc.)
+    unified_verify_pattern: str = "auto"
+    # D6: Prefetch aggressiveness (0.3..1.0)
+    unified_prefetch_aggressiveness: float = 0.7
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +231,9 @@ class _LayerExpertCache:
         "_evictions", "_hits", "_misses",
         "_w13_scale_pool", "_w2_scale_pool",
         "_w13_bias_pool", "_w2_bias_pool",
+        # RWAWE (P2)
+        "_rwawe_enabled", "_rwawe_alpha", "_rwawe_lambda", "_rwawe_beta",
+        "_last_access", "_ema_freq", "_rwawe_step", "_num_experts",
     )
 
     def __init__(
@@ -175,6 +250,12 @@ class _LayerExpertCache:
         w2_bias_shape: tuple | None = None,
         scale_dtype: torch.dtype | None = None,
         bias_dtype: torch.dtype | None = None,
+        # RWAWE (P2)
+        num_experts: int = 128,
+        rwawe_enabled: bool = False,
+        rwawe_alpha: float = 0.6,
+        rwawe_lambda: float = 0.1,
+        rwawe_beta: float = 0.05,
     ):
         self.layer_name = layer_name
         self._max_slots = max_slots
@@ -215,6 +296,15 @@ class _LayerExpertCache:
         self._evictions = 0
         self._hits = 0
         self._misses = 0
+        # RWAWE (P2) tracking
+        self._num_experts = num_experts
+        self._rwawe_enabled = rwawe_enabled
+        self._rwawe_alpha = rwawe_alpha
+        self._rwawe_lambda = rwawe_lambda
+        self._rwawe_beta = rwawe_beta
+        self._last_access = [-1.0] * num_experts
+        self._ema_freq = [0.0] * num_experts
+        self._rwawe_step = 0
 
     @property
     def hit_rate(self) -> float:
@@ -224,14 +314,46 @@ class _LayerExpertCache:
     def contains(self, expert_id: int) -> bool:
         return expert_id in self._slot_map
 
-    def get(self, expert_id: int) -> int | None:
+    def get(self, expert_id: int, utility: float = 1.0) -> int | None:
         """Returns slot index or None. Promotes on hit."""
         if expert_id in self._slot_map:
             self._slot_map.move_to_end(expert_id)
             self._hits += 1
+            # RWAWE (P2): update access tracking, weighted by utility (P3)
+            if self._rwawe_enabled:
+                self._last_access[expert_id] = self._rwawe_step
+                beta = self._rwawe_beta
+                self._ema_freq[expert_id] = (
+                    beta * utility + (1 - beta) * self._ema_freq[expert_id]
+                )
             return self._slot_map[expert_id]
         self._misses += 1
         return None
+
+    def advance_step(self) -> None:
+        """Advance RWAWE step counter. Call once per forward pass per layer."""
+        self._rwawe_step += 1
+
+    def _rwawe_victim(self, exclude: set) -> int | None:
+        """Select lowest-RWAWE-score cached expert as eviction victim."""
+        import math
+        best_victim = None
+        best_score = float('inf')
+        alpha = self._rwawe_alpha
+        lam = self._rwawe_lambda
+        step = self._rwawe_step
+        for eid in self._slot_map:
+            if eid in exclude:
+                continue
+            la = self._last_access[eid]
+            age = step - la if la >= 0 else step + 1
+            r = math.exp(-lam * age)
+            f = self._ema_freq[eid]
+            score = alpha * r + (1 - alpha) * f
+            if score < best_score:
+                best_score = score
+                best_victim = eid
+        return best_victim
 
     def get_slot_tensors(self, slot: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Return (w13_view, w2_view) for the given slot index."""
@@ -258,18 +380,32 @@ class _LayerExpertCache:
             return None, None
         return self._w13_bias_pool[slot], self._w2_bias_pool[slot]
 
-    def alloc_slot(self, expert_id: int) -> int:
-        """Allocate a slot for this expert, evicting LRU if needed."""
+    def alloc_slot(self, expert_id: int, utility: float = 1.0) -> int:
+        """Allocate a slot for this expert, evicting LRU/RWAWE if needed."""
         if expert_id in self._slot_map:
             self._slot_map.move_to_end(expert_id)
             return self._slot_map[expert_id]
         if not self._free_slots:
-            # Evict LRU entry
-            evict_eid, evict_slot = self._slot_map.popitem(last=False)
+            if self._rwawe_enabled:
+                victim = self._rwawe_victim(exclude=set())
+                if victim is not None:
+                    evict_slot = self._slot_map.pop(victim)
+                else:
+                    _, evict_slot = self._slot_map.popitem(last=False)
+            else:
+                # Evict LRU entry
+                _, evict_slot = self._slot_map.popitem(last=False)
             self._free_slots.append(evict_slot)
             self._evictions += 1
         slot = self._free_slots.pop()
         self._slot_map[expert_id] = slot
+        # RWAWE: update tracking, weighted by utility (P3)
+        if self._rwawe_enabled:
+            self._last_access[expert_id] = self._rwawe_step
+            beta = self._rwawe_beta
+            self._ema_freq[expert_id] = (
+                beta * utility + (1 - beta) * self._ema_freq[expert_id]
+            )
         return slot
 
     def alloc_slot_with_victim(
@@ -426,6 +562,7 @@ class ELMMManager:
         # Shared scratchpad (allocated once, reused across layers)
         self._scratch_w13: Optional[torch.Tensor] = None  # [E, 2N, D]
         self._scratch_w2: Optional[torch.Tensor] = None   # [E, D, N]
+        self._scratchpad_on_gpu: bool = False  # True when GPU scratchpad allocated
         # Prefetch stream
         self._prefetch_stream: Optional[torch.cuda.Stream] = None
         if self.config.use_prefetch_stream and torch.cuda.is_available():
@@ -444,16 +581,21 @@ class ELMMManager:
         self._total_cache_hits = 0
         self._total_cache_misses = 0
         self._total_pcie_bytes = 0
+        self._hfde_active_count = 0
+        self._dd_active_count = 0
         # Expert trace: layer_name → last step's expert set (for locality analysis)
         self._last_expert_set: dict[str, set[int]] = {}
         # Temporal locality metrics: layer_name → list of overlap ratios
         self._overlap_history: dict[str, list[float]] = {}
+        self._overlap_unlimited = os.environ.get("ELMM_OVERLAP_UNLIMITED", "0") == "1"
+        self._overlap_dump_path = os.environ.get("ELMM_OVERLAP_DUMP", "")
         # --- Temporal Locality Collection ---
         self._locality_analyzer: Optional[Any] = None
         self._verify_round_counter = 0
         self._current_round_experts: dict[str, set[int]] = {}
         # --- Adaptive Cache Budget ---
         self._hit_rate_ema: dict[str, float] = {}  # layer_name → smoothed hit rate
+        self._unique_experts_ema: dict[str, float] = {}  # layer_name → smoothed unique experts/step
         self._rebalance_step = 0
         self._total_cache_slots = 0  # filled during install()
         # --- Draft-Guided Prefetch ---
@@ -498,10 +640,12 @@ class ELMMManager:
         # Batch size the graphs were captured for (must match at replay)
         self._graph_M: int = 0
         # Master switch (disabled on capture failure or --enforce-eager)
-        import os
+        # CUDA Graph capture is OFF by default because moe_align_block_size
+        # uses dynamic tensor allocations that are incompatible with graph
+        # replay (causes illegal memory access on warm-up/capture).
         self._use_cuda_graph: bool = (
             self.config.enable_cuda_graph
-            and os.environ.get("ELMM_CUDA_GRAPH", "1") != "0"
+            and os.environ.get("ELMM_CUDA_GRAPH", "0") == "1"
         )
         # Diagnostic counters
         self._graph_replay_count: int = 0
@@ -516,9 +660,24 @@ class ELMMManager:
         self._oracle_prefetch_skipped: int = 0
         # Guard: only sync prefetch stream when work was actually issued
         self._prefetch_in_flight: bool = False
+        # --- Stacked Gating Predictor (P1) ---
+        # Inter-layer co-activation frequency tables (built during warmup)
+        # layer_idx → Tensor[num_experts, num_experts] (int32, CPU)
+        self._coact_tables: dict[int, torch.Tensor] = {}
+        # Pre-computed predictions: layer_idx → {expert_N: [top_k experts at N+1]}
+        self._coact_top_k: dict[int, dict[int, list[int]]] = {}
+        self._coact_built: bool = False
+        self._coact_warmup_steps: int = 0  # counts forward passes (all layers)
+        # Track previous layer's experts within a single forward pass
+        self._sg_prev_layer_experts: Optional[list[int]] = None
+        self._sg_prev_layer_idx: int = -1
+        # Prediction accuracy tracking
+        self._sg_predict_correct: int = 0
+        self._sg_predict_total: int = 0
         # --- BriskMoE Integration ---
         # Per-layer SACR eviction policies
         self._briskmoe_sacr: Optional[Any] = None  # SACREvictionPolicy
+        self._aces: Optional[Any] = None  # ACESPolicy
         # Per-layer ELP partitions (shared tracker with SACR)
         self._briskmoe_elp: Optional[Any] = None  # ExpertLifecyclePartition
         # DIPP preloader (shared across layers)
@@ -537,6 +696,51 @@ class ELMMManager:
         # the per-layer remap table is guaranteed valid and we can skip
         # the safety check (.item() GPU→CPU sync) in the TASER fast path.
         self._layer_cache_dirty: dict[str, bool] = {}
+        # --- LDR (Lazy Dirty Resolution) ---
+        # When DIPP prefetch updates a layer's cache AND remap table,
+        # this flag enables a lightweight GPU-side conflict check instead
+        # of forcing the full slow-path validation.  If no routed expert
+        # was evicted (remap[eid] != 0 for all routed eids), the updated
+        # remap is used directly on the fast path.
+        self._layer_dirty_from_dipp: dict[str, bool] = {}
+        # --- TASER v2: Dual-Rail Hot Expert Routing ---
+        # Per-layer phase: 'warmup' | 'converge' | 'cruise' | 'drift'
+        self._taser_phase: dict[str, str] = {}
+        # Per-layer hot expert set (top-hot_slots by frequency)
+        self._hot_set: dict[str, set[int]] = {}
+        # Per-layer expert frequency counter (reset each warmup/drift)
+        self._expert_freq: dict[str, dict[int, int]] = {}
+        # Per-layer miss ratio EMA for drift detection
+        self._miss_ratio_ema: dict[str, float] = {}
+        # Per-layer step when converge started
+        self._converge_start_step: dict[str, int] = {}
+        # Per-layer step when drift started
+        self._drift_start_step: dict[str, int] = {}
+        # Per-layer miss budget (cold_slots count)
+        self._miss_budget: dict[str, int] = {}
+        # TASER v2 diagnostic counters
+        self._taser_v2_cruise_count: int = 0
+        self._taser_v2_dual_rail_count: int = 0
+        self._taser_v2_drift_count: int = 0
+        # --- Unified Scheduling Framework (D1-D6) state ---
+        self._unified_residency: Optional[Any] = None   # ResidencyManager
+        self._unified_governor: Optional[Any] = None     # RuleBasedGovernor
+        self._unified_scheduler: Optional[Any] = None    # VerifyScheduler
+        self._unified_executor: Optional[Any] = None     # HeadTailExecutor
+        self._unified_planner: Optional[Any] = None      # PrefetchPlanner (per-layer)
+        self._unified_split_config: Optional[Any] = None # SplitConfig
+        # Per-layer split weight references (CPU pinned)
+        self._head_w13_refs: dict[str, torch.Tensor] = {}
+        self._head_w2_refs: dict[str, torch.Tensor] = {}
+        self._tail_w13_refs: dict[str, torch.Tensor] = {}
+        self._tail_w2_refs: dict[str, torch.Tensor] = {}
+        # Unified scheduling stats
+        self._unified_step_count: int = 0
+        self._unified_fallback_count: int = 0
+        self._unified_ready_count: int = 0
+        self._unified_current_decision: Optional[Any] = None
+        # --- v3.1 Overflow Controller (C1-C6) ---
+        self._overflow_controller: Optional[Any] = None  # OverflowController
 
     # -----------------------------------------------------------------------
     # Installation
@@ -655,12 +859,26 @@ class ELMMManager:
         # --- Allocate shared GPU scratchpad ---
         ref_dtype = list(self._layer_meta.values())[0]["dtype"]
         device = torch.device("cuda")
-        self._scratch_w13 = torch.empty(
-            max_w13_shape, dtype=ref_dtype, device=device
-        )
-        self._scratch_w2 = torch.empty(
-            max_w2_shape, dtype=ref_dtype, device=device
-        )
+
+        # In unified mode, D4 pools replace the legacy cache; skip heavy allocations.
+        # In pool-direct mode, scratchpad is never used (kernel reads from pool
+        # directly); skip allocation to save ~1.12 GiB GPU memory.
+        _unified_mode = self.config.enable_unified_scheduling
+        _skip_scratchpad = _unified_mode or self.config.enable_pool_direct
+
+        if not _skip_scratchpad:
+            self._scratch_w13 = torch.empty(
+                max_w13_shape, dtype=ref_dtype, device=device
+            )
+            self._scratch_w2 = torch.empty(
+                max_w2_shape, dtype=ref_dtype, device=device
+            )
+            self._scratchpad_on_gpu = True
+        else:
+            # Allocate tiny placeholders so code referencing them doesn't crash
+            self._scratch_w13 = torch.empty(1, dtype=ref_dtype, device="cpu")
+            self._scratch_w2 = torch.empty(1, dtype=ref_dtype, device="cpu")
+            self._scratchpad_on_gpu = False
         scratch_mb = (max_w13_bytes + max_w2_bytes) / 1024**2
 
         # --- Distribute cache budget across layers (pre-allocate GPU pool) ---
@@ -672,7 +890,11 @@ class ELMMManager:
         for name, _module in offloaded_layers:
             meta = self._layer_meta[name]
             expert_size = meta["expert_size"]
-            max_slots = max(1, per_layer_budget // expert_size)
+            if _unified_mode:
+                # In unified mode, allocate minimal 1-slot cache (placeholder)
+                max_slots = 1
+            else:
+                max_slots = max(1, per_layer_budget // expert_size)
             w13_shape = meta["w13_shape"]  # (E, dim1, dim2)
             w2_shape = meta["w2_shape"]    # (E, dim1, dim2)
             # Single expert shapes (exclude the E dimension)
@@ -695,6 +917,12 @@ class ELMMManager:
                     if "w2_bias_shape" in meta else None,
                 scale_dtype=meta.get("scale_dtype"),
                 bias_dtype=meta.get("bias_dtype"),
+                # RWAWE (P2)
+                num_experts=meta.get("num_experts", 128),
+                rwawe_enabled=self.config.enable_rwawe,
+                rwawe_alpha=self.config.rwawe_alpha,
+                rwawe_lambda=self.config.rwawe_lambda,
+                rwawe_beta=self.config.rwawe_beta,
             )
             self._layer_caches[name] = cache
             total_cache_alloc += max_slots * expert_size
@@ -724,6 +952,7 @@ class ELMMManager:
         # Initialize adaptive budget EMA for each layer
         for name in self._layer_caches:
             self._hit_rate_ema[name] = 0.5  # neutral start
+            self._unique_experts_ema[name] = float(experts_per_layer)  # start at capacity
         # Initialize remap table for pool-direct mode
         if self.config.enable_pool_direct:
             max_experts = max(m["num_experts"] for m in self._layer_meta.values())
@@ -754,9 +983,9 @@ class ELMMManager:
         if self.config.stale_remap_interval > 0 and self.config.enable_pool_direct:
             max_experts = max(m["num_experts"] for m in self._layer_meta.values())
             for name in self._layer_caches:
-                # Initialize to all-zeros (safe default: slot 0 is always valid)
-                self._layer_remap[name] = torch.zeros(
-                    max_experts, dtype=torch.long, device=device
+                # Initialize to -1 sentinel (uncached); slot 0 is valid
+                self._layer_remap[name] = torch.full(
+                    (max_experts,), -1, dtype=torch.long, device=device
                 )
                 self._layer_remap_step[name] = 0
                 self._layer_adaptive_interval[name] = self.config.stale_remap_interval
@@ -764,6 +993,23 @@ class ELMMManager:
             print(f"[ELMM] TASER enabled: interval={self.config.stale_remap_interval}, "
                   f"max_interval={self.config.stale_remap_max_interval}, "
                   f"warmup={self.config.stale_remap_warmup}",
+                  file=sys.stderr, flush=True)
+            # --- TASER v2: Initialize per-layer dual-rail state ---
+            for name, cache in self._layer_caches.items():
+                cold = min(self.config.taser_cold_slots,
+                           cache._max_slots // 4)
+                self._taser_phase[name] = 'warmup'
+                self._hot_set[name] = set()
+                self._expert_freq[name] = {}
+                self._miss_ratio_ema[name] = 0.0
+                self._converge_start_step[name] = 0
+                self._drift_start_step[name] = 0
+                self._miss_budget[name] = max(cold, 1)
+            print(f"[ELMM] TASER v2 dual-rail enabled: "
+                  f"cold_slots={self.config.taser_cold_slots}, "
+                  f"miss_budget_ratio={self.config.taser_miss_budget_ratio}, "
+                  f"converge_threshold={self.config.taser_converge_threshold}, "
+                  f"drift_miss_threshold={self.config.taser_drift_miss_threshold}",
                   file=sys.stderr, flush=True)
         # Build ordered layer list for cross-layer oracle prefetch
         self._ordered_layers = sorted(
@@ -773,6 +1019,26 @@ class ELMMManager:
         self._layer_index = {n: i for i, n in enumerate(self._ordered_layers)}
         if self.config.enable_oracle_prefetch:
             print(f"[ELMM] Oracle prefetch enabled ({len(self._ordered_layers)} layers)",
+                  file=sys.stderr, flush=True)
+        # --- Stacked Gating: initialize co-activation tables ---
+        if self.config.enable_stacked_gating and len(self._ordered_layers) > 1:
+            # Determine num_experts from the first layer's metadata
+            first_meta = next(iter(self._layer_meta.values()), {})
+            num_experts = first_meta.get("num_experts", 128)
+            for i in range(len(self._ordered_layers) - 1):
+                self._coact_tables[i] = torch.zeros(
+                    num_experts, num_experts, dtype=torch.int32)
+            print(f"[ELMM] Stacked Gating enabled: "
+                  f"{len(self._coact_tables)} layer pairs, "
+                  f"{num_experts} experts, "
+                  f"top-{self.config.stacked_gating_top_k} predictions",
+                  file=sys.stderr, flush=True)
+        # --- RWAWE (P2) log ---
+        if self.config.enable_rwawe:
+            print(f"[ELMM] RWAWE eviction enabled: "
+                  f"alpha={self.config.rwawe_alpha}, "
+                  f"lambda={self.config.rwawe_lambda}, "
+                  f"beta={self.config.rwawe_beta}",
                   file=sys.stderr, flush=True)
         # --- BriskMoE: Initialize SACR + ELP + DIPP ---
         # Build layer_name → layer_id mapping
@@ -846,6 +1112,16 @@ class ELMMManager:
                   f"λ={pc_config.lru_fallback_weight})",
                   file=sys.stderr, flush=True)
 
+        if self.config.enable_aces:
+            from adapters.aces import ACESConfig, ACESPolicy
+            max_experts_ac = max(m["num_experts"] for m in self._layer_meta.values())
+            aces_cfg = ACESConfig(beta=self.config.aces_beta,
+                                  num_experts=max_experts_ac)
+            self._aces = ACESPolicy(config=aces_cfg)
+            print(f"[ELMM] ACES enabled (β={aces_cfg.beta}, "
+                  f"num_experts={aces_cfg.num_experts})",
+                  file=sys.stderr, flush=True)
+
         # Check if any layer has quant aux pools
         has_aux = any(c.has_aux_pools for c in self._layer_caches.values())
         if has_aux:
@@ -854,12 +1130,165 @@ class ELMMManager:
 
         msg = (
             f"ELMM installed: {num_layers} offloaded layers, "
-            f"scratchpad={scratch_mb:.0f} MB, "
+            f"scratchpad={'SKIPPED (pool-direct)' if not self._scratchpad_on_gpu else f'{scratch_mb:.0f} MB'}, "
             f"cache={total_cache_alloc / 1024**3:.2f} GB "
             f"(~{experts_per_layer} experts/layer)"
         )
         print(f"[ELMM] {msg}", file=sys.stderr, flush=True)
         logger.info(msg)
+
+        # Auto-dump overlap history on exit if ELMM_OVERLAP_DUMP is set.
+        if self._overlap_dump_path:
+            import atexit
+            atexit.register(self._dump_overlap_history)
+
+        # --- Unified Scheduling Framework (D1-D6) Setup ---
+        if self.config.enable_unified_scheduling:
+            self._setup_unified_scheduling(offloaded_layers, ref_dtype, device)
+
+    # -----------------------------------------------------------------------
+    # Unified Scheduling Framework (D1-D6) Setup
+    # -----------------------------------------------------------------------
+
+    def _setup_unified_scheduling(self, offloaded_layers, dtype, device):
+        """
+        Initialize D1-D6 modules: split weights, create ResidencyManager,
+        Governor, VerifyScheduler, HeadTailExecutor, PrefetchPlanner.
+        """
+        import sys
+        from adapters.expert_split import SplitConfig, split_layer_experts
+        from adapters.residency_manager import ResidencyConfig, ResidencyManager
+        from adapters.governor import GovernorConfig, RuleBasedGovernor
+        from adapters.verify_scheduler import VerifySchedulerConfig, VerifyScheduler
+        from adapters.head_tail_executor import HeadTailExecutor
+        from adapters.prefetch_planner import PrefetchPlanner
+
+        first_meta = next(iter(self._layer_meta.values()))
+        num_experts = first_meta["num_experts"]
+        w13_shape = first_meta["w13_shape"]  # (E, 2*inter, hidden)
+        w2_shape = first_meta["w2_shape"]    # (E, hidden, inter)
+        inter_size = w2_shape[2]   # intermediate_size (e.g. 768)
+        hidden_size = w2_shape[1]  # hidden_size (e.g. 2048)
+        num_layers = len(offloaded_layers)
+
+        # D3: SplitConfig
+        split_cfg = SplitConfig(
+            split_ratio=self.config.unified_split_ratio,
+            intermediate_size=inter_size,
+            hidden_size=hidden_size,
+        )
+        self._unified_split_config = split_cfg
+        print(f"[UNIFIED] D3 SplitConfig: θ={split_cfg.split_ratio}, "
+              f"head_inter={split_cfg.head_inter}, tail_inter={split_cfg.tail_inter}, "
+              f"head={split_cfg.head_expert_bytes/1e6:.1f}MB, "
+              f"tail={split_cfg.tail_expert_bytes/1e6:.1f}MB",
+              file=sys.stderr, flush=True)
+
+        # D4: ResidencyManager
+        # Auto-detect GPU budget: use configured value or measure free memory
+        d4_budget = self.config.unified_budget_bytes
+        if d4_budget <= 0:
+            # Auto: reserve 10 GiB for vLLM KV cache, profiling, and overhead
+            # The profiling forward pass temporarily allocates ~3-6 GiB for activations
+            # KV cache needs ~0.5-2 GiB, plus miscellaneous overhead
+            free_mem = torch.cuda.mem_get_info(device)[0]
+            kv_overhead = 10 * 1024**3  # 10 GiB reserved
+            d4_budget = max(0, int(free_mem - kv_overhead))
+            print(f"[UNIFIED] D4 auto-budget: free_gpu={free_mem/1024**3:.2f} GiB, "
+                  f"reserve={kv_overhead/1024**3:.0f} GiB, "
+                  f"d4_budget={d4_budget/1024**3:.2f} GiB",
+                  file=sys.stderr, flush=True)
+
+        res_cfg = ResidencyConfig(
+            gpu_cache_budget_bytes=d4_budget,
+            num_layers=num_layers,
+            num_experts=num_experts,
+            split_ratio=self.config.unified_split_ratio,
+            intermediate_size=inter_size,
+            hidden_size=hidden_size,
+            dtype=dtype,
+            tail_slots_per_layer=self.config.unified_tail_slots,
+            head_eviction="rwawe",
+            rwawe_alpha=self.config.rwawe_alpha,
+            rwawe_lambda=self.config.rwawe_lambda,
+            rwawe_beta=self.config.rwawe_beta,
+            enable_reservation=False,  # Executor manages allocation directly
+        )
+        residency = ResidencyManager(config=res_cfg, device=str(device))
+        self._unified_residency = residency
+        print(f"[UNIFIED] D4 ResidencyManager: head_slots={residency.head_slots_per_layer}, "
+              f"tail_slots={residency.tail_slots_per_layer}",
+              file=sys.stderr, flush=True)
+
+        # D3+D4: Split weights & register layers
+        for name, module in offloaded_layers:
+            # Ensure weights are on CPU for splitting (UVA views report as CUDA)
+            w13 = module.w13_weight.data.cpu()  # (E, 2*inter, hidden)
+            w2 = module.w2_weight.data.cpu()    # (E, hidden, inter)
+            head_w13, head_w2, tail_w13, tail_w2 = split_layer_experts(
+                w13, w2, split_cfg
+            )
+            # Pin CPU tensors for async H2D
+            if not head_w13.is_pinned():
+                head_w13 = head_w13.pin_memory()
+                head_w2 = head_w2.pin_memory()
+                tail_w13 = tail_w13.pin_memory()
+                tail_w2 = tail_w2.pin_memory()
+            # Store CPU pinned references
+            self._head_w13_refs[name] = head_w13
+            self._head_w2_refs[name] = head_w2
+            self._tail_w13_refs[name] = tail_w13
+            self._tail_w2_refs[name] = tail_w2
+            # Register with ResidencyManager (creates GPU pools)
+            residency.register_layer(
+                name, head_w13, head_w2, tail_w13, tail_w2
+            )
+
+        print(f"[UNIFIED] D3 weight splitting done ({num_layers} layers × {num_experts} experts)",
+              file=sys.stderr, flush=True)
+
+        # D1: Governor
+        gov_cfg = GovernorConfig(
+            mode=self.config.unified_governor_mode,
+            K_min=self.config.unified_K_min,
+            K_max=self.config.unified_K_max,
+            K_default=self.config.unified_K_default,
+            top_k=8,  # Qwen3-30B top_k
+        )
+        self._unified_governor = RuleBasedGovernor(config=gov_cfg)
+        print(f"[UNIFIED] D1 Governor: mode={gov_cfg.mode}, K={gov_cfg.K_default} "
+              f"[{gov_cfg.K_min}..{gov_cfg.K_max}]",
+              file=sys.stderr, flush=True)
+
+        # D2: VerifyScheduler
+        sched_cfg = VerifySchedulerConfig(
+            default_pattern=self.config.unified_verify_pattern,
+        )
+        self._unified_scheduler = VerifyScheduler(config=sched_cfg)
+        print(f"[UNIFIED] D2 VerifyScheduler: pattern={sched_cfg.default_pattern}",
+              file=sys.stderr, flush=True)
+
+        # D5: HeadTailExecutor
+        stream = self._prefetch_stream
+        self._unified_executor = HeadTailExecutor(
+            prefetch_stream=stream,
+            max_M=64,
+            top_k=8,
+            head_inter=split_cfg.head_inter,
+            tail_inter=split_cfg.tail_inter,
+            hidden_size=hidden_size,
+            dtype=dtype,
+        )
+        print(f"[UNIFIED] D5 HeadTailExecutor: head_inter={split_cfg.head_inter}, "
+              f"tail_inter={split_cfg.tail_inter}",
+              file=sys.stderr, flush=True)
+
+        # D6: PrefetchPlanner (created fresh per-step, not stored)
+        # We store a factory lambda instead
+        self._unified_planner = None  # created per-step
+
+        print(f"[UNIFIED] D1-D6 unified scheduling framework initialized",
+              file=sys.stderr, flush=True)
 
     # -----------------------------------------------------------------------
     # Direct Triton Dispatch setup
@@ -1044,13 +1473,16 @@ class ELMMManager:
     # Oracle Cross-Layer Prefetch (ALPS Phase 2)
     # -----------------------------------------------------------------------
 
-    def _oracle_prefetch_next_layer(self, layer_name: str):
+    def _oracle_prefetch_next_layer(self, layer_name: str,
+                                    topk_ids: Optional[torch.Tensor] = None):
         """Prefetch experts for the next offloaded layer on _prefetch_stream.
 
         Called at the start of Phase 4 (MoE kernel) so that PCIe H2D
-        transfers overlap with the HBM-bound MoE compute.  Uses the
-        frozen TASER remap table to deterministically identify which
-        experts next-layer needs; only issues loads for cache misses.
+        transfers overlap with the HBM-bound MoE compute.
+
+        Prediction source (in priority order):
+          1. Stacked Gating: use Layer N's actual topk_ids + co-activation table
+          2. Fallback: current layer's cached expert set (Jaccard ~33% overlap)
 
         During stale path (99%+ of decode calls) the next-layer cache
         is already fully populated → no-op.  Benefit comes during:
@@ -1085,12 +1517,19 @@ class ELMMManager:
             self._oracle_prefetch_skipped += 1
             return
 
-        # Use current layer's cached experts as prediction for next layer.
-        # Rationale: adjacent MoE layers tend to activate overlapping experts
-        # (inter-layer Jaccard ~33%).  Cache slot_map provides broader coverage
-        # than per-step routing, and avoids GPU→CPU sync for topk_ids.
-        cur_cache = self._layer_caches[layer_name]
-        predicted_eids = set(cur_cache._slot_map.keys())
+        # Prediction: Stacked Gating (P1) or fallback to cache overlap
+        if (self.config.enable_stacked_gating
+                and self._coact_built
+                and topk_ids is not None):
+            predicted_eids = self._predict_next_layer_experts(
+                layer_name, topk_ids)
+            # Track prediction accuracy (after warmup, when we have ground truth)
+            if predicted_eids:
+                self._sg_predict_total += len(predicted_eids)
+        else:
+            # Fallback: use current layer's cached experts as prediction
+            cur_cache = self._layer_caches[layer_name]
+            predicted_eids = set(cur_cache._slot_map.keys())
 
         # Only prefetch experts NOT already in next_cache
         to_prefetch = predicted_eids - cached_eids
@@ -1127,7 +1566,7 @@ class ELMMManager:
                         and eid not in next_cache._slot_map):
                     evict_eid = next(iter(next_cache._slot_map))
                     if next_remap_tbl is not None:
-                        next_remap_tbl[evict_eid] = 0
+                        next_remap_tbl[evict_eid] = -1
                 slot = next_cache.alloc_slot(eid)
                 pool_w13, pool_w2 = next_cache.get_slot_tensors(slot)
                 pool_w13.copy_(w13_ref[eid], non_blocking=True)
@@ -1150,6 +1589,55 @@ class ELMMManager:
             # Mark NEXT layer dirty (its cache was modified)
             self._layer_cache_dirty[next_name] = True
         self._oracle_prefetch_issued += count
+
+    # -----------------------------------------------------------------------
+    # Stacked Gating: co-activation table finalization + prediction
+    # -----------------------------------------------------------------------
+
+    def _finalize_coact_tables(self):
+        """Convert raw co-activation counts into top-K prediction tables."""
+        sg_k = self.config.stacked_gating_top_k
+        for layer_idx, tbl in self._coact_tables.items():
+            # For each source expert, find top-K most co-activated next-layer experts
+            top_k_dict: dict[int, list[int]] = {}
+            for src_e in range(tbl.shape[0]):
+                row = tbl[src_e]
+                if row.sum().item() == 0:
+                    continue
+                # Get top-K indices (most frequently co-activated)
+                k = min(sg_k, (row > 0).sum().item())
+                if k > 0:
+                    _, top_indices = row.topk(k)
+                    top_k_dict[src_e] = top_indices.tolist()
+            self._coact_top_k[layer_idx] = top_k_dict
+        self._coact_built = True
+        # Print diagnostic
+        total_entries = sum(len(d) for d in self._coact_top_k.values())
+        import sys
+        print(f"[ELMM] Stacked Gating: co-activation tables built "
+              f"({len(self._coact_top_k)} layer pairs, "
+              f"{total_entries} source experts, "
+              f"top-{sg_k} predictions, "
+              f"after {self._coact_warmup_steps} warmup steps)",
+              file=sys.stderr, flush=True)
+
+    def _predict_next_layer_experts(
+        self, layer_name: str, topk_ids: torch.Tensor,
+    ) -> set[int]:
+        """Predict Layer N+1's experts from Layer N's actual routing."""
+        idx = self._layer_index.get(layer_name)
+        if idx is None or idx not in self._coact_top_k:
+            return set()
+        pred_table = self._coact_top_k[idx]
+        if not pred_table:
+            return set()
+        predictions: set[int] = set()
+        routed = topk_ids.reshape(-1).unique().tolist()
+        for e in routed:
+            preds = pred_table.get(e)
+            if preds:
+                predictions.update(preds)
+        return predictions
 
     # -----------------------------------------------------------------------
     # GPU-Side Cache Lookup (E1 optimization)
@@ -1271,6 +1759,47 @@ class ELMMManager:
         return remapped_ids, step_hits, step_misses
 
     # -----------------------------------------------------------------------
+    # TASER v2 helpers
+    # -----------------------------------------------------------------------
+
+    def _taser_v2_build_hot_set(self, layer_name: str):
+        """Build hot_set from frequency stats (top hot_slots experts)."""
+        freq = self._expert_freq[layer_name]
+        cache = self._layer_caches[layer_name]
+        cold = min(self.config.taser_cold_slots, cache._max_slots // 4)
+        hot_slots = cache._max_slots - cold
+        sorted_experts = sorted(freq.keys(), key=lambda e: freq[e], reverse=True)
+        self._hot_set[layer_name] = set(sorted_experts[:hot_slots])
+
+    def _taser_v2_freeze_remap(self, layer_name: str):
+        """Freeze remap table with ALL cached experts.
+        
+        Maps every cached expert to its slot.  Unmapped experts get -1
+        sentinel so CRUISE fast path can detect misses and route them
+        to the HFDE dual-rail path for exact computation.
+        """
+        lr = self._layer_remap[layer_name]
+        cache = self._layer_caches[layer_name]
+        lr.fill_(-1)  # sentinel: unmapped experts are detectable
+        for eid, slot in cache._slot_map.items():
+            lr[eid] = slot
+
+    def _taser_v2_compute_convergence(self, layer_name: str) -> float:
+        """Fraction of hot_set experts present in cache."""
+        hot_set = self._hot_set[layer_name]
+        if not hot_set:
+            return 0.0
+        cache = self._layer_caches[layer_name]
+        cached = set(cache._slot_map.keys())
+        return len(cached & hot_set) / len(hot_set)
+
+    def _taser_v2_collect_freq(self, layer_name: str, topk_ids: torch.Tensor):
+        """Accumulate expert frequency from topk_ids."""
+        freq = self._expert_freq[layer_name]
+        for eid in topk_ids.reshape(-1).tolist():
+            freq[eid] = freq.get(eid, 0) + 1
+
+    # -----------------------------------------------------------------------
     # Core: ELMM forward_impl (scratchpad + swap)
     # -----------------------------------------------------------------------
 
@@ -1340,6 +1869,59 @@ class ELMMManager:
             router_logits=router_logits,
         )
 
+        # --- Unified Scheduling (D1-D6): delegate to unified pipeline ---
+        if self.config.enable_unified_scheduling and self._unified_residency is not None:
+            self._maybe_profile_end(p_tok)
+            final_hidden = self._unified_forward_layer(
+                layer_name, hidden_states, topk_weights, topk_ids, module
+            )
+            # Handle shared experts
+            if has_separate_shared:
+                if run_shared_parallel:
+                    torch.cuda.current_stream().wait_stream(self._shared_expert_stream)
+                elif use_shared_stream:
+                    from vllm.utils.torch_utils import current_stream
+                    with torch.cuda.stream(module.shared_experts_stream):
+                        shared_output = module.shared_experts(hidden_clone)
+                    current_stream().wait_stream(module.shared_experts_stream)
+                final_hidden = (shared_output, final_hidden)
+            self._total_intercepts += 0  # already incremented above
+            return final_hidden
+
+        # --- ACES: update EMA from router logits ---
+        if self._aces is not None:
+            _lid = self._layer_name_to_id.get(layer_name, -1)
+            if _lid >= 0:
+                self._aces.update(_lid, router_logits)
+
+        # --- Stacked Gating: record co-activations during warmup ---
+        if (self.config.enable_stacked_gating
+                and not self._coact_built
+                and self._ordered_layers):
+            cur_idx = self._layer_index.get(layer_name, -1)
+            if cur_idx >= 0:
+                cur_experts = topk_ids.reshape(-1).unique().tolist()
+                # Record co-activations between previous layer and current
+                if (self._sg_prev_layer_idx >= 0
+                        and self._sg_prev_layer_idx == cur_idx - 1
+                        and self._sg_prev_layer_experts is not None):
+                    prev_idx = self._sg_prev_layer_idx
+                    tbl = self._coact_tables.get(prev_idx)
+                    if tbl is not None:
+                        for ep in self._sg_prev_layer_experts:
+                            for ec in cur_experts:
+                                tbl[ep, ec] += 1
+                self._sg_prev_layer_experts = cur_experts
+                self._sg_prev_layer_idx = cur_idx
+                # Check if warmup is complete (last layer of a forward pass)
+                if cur_idx == len(self._ordered_layers) - 1:
+                    self._coact_warmup_steps += 1
+                    # Reset for next forward pass
+                    self._sg_prev_layer_experts = None
+                    self._sg_prev_layer_idx = -1
+                    if self._coact_warmup_steps >= self.config.stale_remap_warmup:
+                        self._finalize_coact_tables()
+
         # --- Phase 3: Cache lookup + scratchpad fill ---
         self._maybe_profile_end(p_tok)
         p_tok = self._maybe_profile_start("P3_cache")
@@ -1355,43 +1937,136 @@ class ELMMManager:
             self.config.enable_pool_direct and self._remap_table is not None
         )
 
-        # === TASER: Temporal-Adaptive Stale Expert Routing Fast Path ===
-        # After warmup, reuse per-layer remap and skip all Phase 3 work.
-        # Adaptive interval grows when routing is stable (2× per unchanged
-        # validation), shrinks when routing changes (reset to initial).
-        # Inspired by adaptive branch prediction (MICRO'91) and
-        # activation-aware prefetching (MoE-Infinity, OSDI'24).
+        # === TASER v2: Four-Phase Dual-Rail Hot Expert Routing ===
+        # Phases: WARMUP → CONVERGE → CRUISE → DRIFT (→ CONVERGE → ...)
+        # CRUISE uses dual-rail: hit experts → pool-direct, miss → HFDE.
         stale_remap_ok = False
+        taser_v2_dual_rail = False  # True when cruise dual-rail path is active
+        _taser_v2_miss_data = None  # (remapped_ids, is_miss_flat, miss_eid_list)
+        _taser_debug_layer = ("layers.1." in layer_name)
+        hfde_active = False  # set True inside CPU cache path when eligible
         sri = self.config.stale_remap_interval
         if sri > 0 and use_pool_direct and layer_name in self._layer_remap:
             step = self._layer_remap_step[layer_name]
-            next_val = self._layer_next_validation.get(layer_name, 0)
-            if step >= self.config.stale_remap_warmup and step != next_val:
-                # Check dirty flag: if cache was modified since last
-                # validation, fall through to slow path (safe).
+            phase = self._taser_phase.get(layer_name, 'warmup')
+            lr = self._layer_remap[layer_name]
+
+            # ── Phase A: WARMUP (collect freq, always slow path) ──
+            if phase == 'warmup':
+                self._taser_v2_collect_freq(layer_name, topk_ids)
+                if step >= self.config.stale_remap_warmup:
+                    self._taser_v2_build_hot_set(layer_name)
+                    self._taser_phase[layer_name] = 'converge'
+                    self._converge_start_step[layer_name] = step
+                    phase = 'converge'
+                # else: fall through to slow path
+
+            # ── Phase D: DRIFT (short re-warmup, always slow path) ──
+            elif phase == 'drift':
+                self._taser_v2_collect_freq(layer_name, topk_ids)
+                drift_steps = step - self._drift_start_step[layer_name]
+                if drift_steps >= self.config.taser_drift_warmup:
+                    self._taser_v2_build_hot_set(layer_name)
+                    self._taser_phase[layer_name] = 'converge'
+                    self._converge_start_step[layer_name] = step
+                    phase = 'converge'
+                # else: fall through to slow path
+
+            # ── Phase B: CONVERGE (slow path, check convergence) ──
+            if phase == 'converge':
+                # Convergence is checked after Phase 3 remap rebuild below
+                pass  # fall through to slow path
+
+            # ── Phase C: CRUISE (fast path, skip Phase 3) ──
+            elif phase == 'cruise':
+                # Check dirty flag: prefetch/oracle/rebalance may have
+                # modified the cache since freeze. If dirty, rebuild remap
+                # from current cache state (keeps CRUISE, doesn't drift).
                 if self._layer_cache_dirty.get(layer_name, False):
-                    # Cache modified by prefetch/oracle/rebalance →
-                    # force validation to rebuild remap table.
+                    lr.fill_(-1)
+                    cache = self._layer_caches[layer_name]
+                    for _eid, _slot in cache._slot_map.items():
+                        lr[_eid] = _slot
+                    self._layer_cache_dirty[layer_name] = False
+
+                # Periodic validation: every N steps, fall to slow path
+                # to refresh remap. Use v1 adaptive interval.
+                cruise_interval = self._layer_adaptive_interval.get(layer_name, sri)
+                cruise_next = self._layer_next_validation.get(layer_name, 0)
+                if step >= cruise_next:
+                    # Validation step: fall through to slow path
+                    # Drift detection happens after Phase 3 rebuild
                     pass
                 else:
-                    # FAST PATH: remap table guaranteed valid.
-                    # No GPU→CPU sync needed — skip .item() safety check.
-                    lr = self._layer_remap[layer_name]
+                    # CRUISE FAST PATH: use frozen remap, detect misses
                     remapped_ids = lr[topk_ids]
-                    step_hits = 0  # stats unavailable in fast path
-                    step_misses = 0
-                    stale_remap_ok = True
-                    # --- ALPS Phase 1: lazy CUDA Graph capture ---
-                    # On the first stale-path invocation per layer,
-                    # capture the Direct Dispatch as a CUDA Graph.
-                    if (self._use_cuda_graph
-                            and self.config.enable_direct_dispatch
-                            and layer_name not in self._layer_graphs):
-                        self._try_capture_layer_graph(
-                            layer_name, hidden_states, topk_weights, remapped_ids)
+                    is_miss = (remapped_ids < 0)  # [M, top_k] bool
+                    n_miss = is_miss.any().item()  # quick check: any miss?
+
+                    if not n_miss:
+                        # Pure fast path: ALL experts in remap
+                        step_hits = 0
+                        step_misses = 0
+                        stale_remap_ok = True
+                        self._taser_v2_cruise_count += 1
+                    else:
+                        # Has misses — count and identify
+                        miss_expert_ids = topk_ids[is_miss].unique()
+                        n_unique_miss = miss_expert_ids.numel()
+                        miss_budget = self._miss_budget.get(layer_name, 3)
+
+                        if (n_unique_miss <= miss_budget
+                                and self._prefetch_stream is not None):
+                            # DUAL-RAIL: hit → single-pass kernel,
+                            # miss → HFDE async load + second pass.
+                            miss_list = miss_expert_ids.tolist()
+                            taser_v2_dual_rail = True
+                            _taser_v2_miss_data = (remapped_ids, is_miss, miss_list)
+                            self._taser_v2_dual_rail_count += 1
+                            self._layer_cache_dirty[layer_name] = True
+
+                            # Drift detection
+                            n_total = topk_ids.reshape(-1).unique().numel()
+                            miss_ratio = n_unique_miss / max(n_total, 1)
+                            step_hits = n_total - n_unique_miss
+                            step_misses = n_unique_miss
+                            alpha = self.config.taser_drift_ema_alpha
+                            ema = self._miss_ratio_ema.get(layer_name, 0.0)
+                            self._miss_ratio_ema[layer_name] = (
+                                (1 - alpha) * ema + alpha * miss_ratio
+                            )
+                            if self._miss_ratio_ema[layer_name] > self.config.taser_drift_miss_threshold:
+                                self._taser_phase[layer_name] = 'drift'
+                                self._drift_start_step[layer_name] = step
+                                self._expert_freq[layer_name] = {}
+                                self._taser_v2_drift_count += 1
+                                # Cancel dual-rail, fall to slow path
+                                taser_v2_dual_rail = False
+                                _taser_v2_miss_data = None
+                        else:
+                            # Too many misses or no stream: fall to slow path
+                            pass  # stale_remap_ok stays False
+
             self._layer_remap_step[layer_name] = step + 1
 
-        if not stale_remap_ok:
+            # --- TASER diagnostic ---
+            if _taser_debug_layer and step > 0 and step % 500 == 0:
+                import sys
+                _fp = getattr(self, '_taser_fast_count', 0)
+                _sp = getattr(self, '_taser_slow_count', 0)
+                _cr = self._taser_v2_cruise_count
+                _dr = self._taser_v2_dual_rail_count
+                _df = self._taser_v2_drift_count
+                print(f"[TASER-v2] {layer_name} step={step}: "
+                      f"phase={self._taser_phase.get(layer_name,'?')}, "
+                      f"fast={_fp}, slow={_sp}, cruise={_cr}, "
+                      f"dual_rail={_dr}, drift={_df}",
+                      file=sys.stderr, flush=True)
+            if stale_remap_ok:
+                self._taser_fast_count = getattr(self, '_taser_fast_count', 0) + 1
+
+        if not stale_remap_ok and not taser_v2_dual_rail:
+            self._taser_slow_count = getattr(self, '_taser_slow_count', 0) + 1
             # Need full Phase 3 (either stale-remap disabled, warmup, or validation step)
             use_gpu_cache = (
                 self.config.enable_gpu_cache
@@ -1418,7 +2093,7 @@ class ELMMManager:
                 unique_list = unique_experts.tolist()
                 unique_set = set(unique_list)
 
-                # Track temporal locality (lightweight: only keep last 100 samples)
+                # Track temporal locality
                 prev_set = self._last_expert_set.get(layer_name)
                 if prev_set is not None and len(prev_set) > 0:
                     overlap = len(prev_set & unique_set) / len(prev_set | unique_set)
@@ -1427,7 +2102,7 @@ class ELMMManager:
                         hist = []
                         self._overlap_history[layer_name] = hist
                     hist.append(overlap)
-                    if len(hist) > 100:
+                    if not self._overlap_unlimited and len(hist) > 100:
                         hist.pop(0)
                 self._last_expert_set[layer_name] = unique_set
 
@@ -1448,12 +2123,27 @@ class ELMMManager:
                 w2_ref = module.w2_weight
 
                 # Classify experts into cache hits and misses
+                if cache._rwawe_enabled:
+                    cache.advance_step()
+                # Draft-Utility (P3): compute per-expert utility from token coverage
+                M = hidden_states.shape[0]
+                if (self.config.enable_draft_utility
+                        and cache._rwawe_enabled and M > 1):
+                    _flat_ids = topk_ids.view(-1).tolist()
+                    _ucounts: dict[int, int] = {}
+                    for _uid in _flat_ids:
+                        _ucounts[_uid] = _ucounts.get(_uid, 0) + 1
+                    _utility_map = {e: min(c / M, 1.0)
+                                    for e, c in _ucounts.items()}
+                else:
+                    _utility_map = None
                 hit_eids: list[int] = []
                 hit_slots: list[int] = []
                 miss_eids: list[int] = []
 
                 for eid in unique_list:
-                    slot = cache.get(eid)
+                    _u = _utility_map.get(eid, 1.0) if _utility_map else 1.0
+                    slot = cache.get(eid, utility=_u)
                     if slot is not None:
                         hit_eids.append(eid)
                         hit_slots.append(slot)
@@ -1465,12 +2155,45 @@ class ELMMManager:
                 pcie_bytes = step_misses * meta["expert_size"]
                 self._maybe_profile_end(p3a_tok)
 
+                # Pool overflow guard: when the number of unique experts
+                # exceeds cache capacity (common during prefill with many
+                # tokens), fall back to UVA weights directly.  Without
+                # this, cache eviction during miss-loading overwrites hits,
+                # making the remap table inconsistent with slot contents.
+                if use_pool_direct and len(unique_list) > cache._max_slots:
+                    use_pool_direct = False
+
                 # Handle cache misses: copy UVA → pool slot
                 p3b_tok = self._maybe_profile_start("P3b_load")
                 miss_slots: list[int] = []
                 use_sacr = self._briskmoe_sacr is not None
                 use_elp = self._briskmoe_elp is not None
                 use_briskmoe = use_sacr or use_elp
+                # ACES eviction only when NOT in TASER-mapping mode
+                use_aces = (self._aces is not None
+                            and not self.config.aces_taser)
+
+                # --- HFDE eligibility check ---
+                # Overlap miss-loading (PCIe) with hit-expert compute (GPU)
+                # by loading misses on _prefetch_stream while the hit
+                # kernel runs on the default stream.
+                M = hidden_states.shape[0]
+                hfde_active = (
+                    self.config.enable_hfde
+                    and step_misses > 0
+                    and step_hits > 0
+                    and use_pool_direct
+                    and self._prefetch_stream is not None
+                    and self.config.enable_direct_dispatch
+                    and self._dd_invoke_kernel is not None
+                    and M <= self._dd_max_M
+                )
+                if hfde_active:
+                    _hfde_stream = self._prefetch_stream
+                    _hfde_stream.wait_stream(torch.cuda.current_stream())
+                    _hfde_ctx = torch.cuda.stream(_hfde_stream)
+                else:
+                    _hfde_ctx = contextlib.nullcontext()
                 use_pred_cache = self._pred_cache is not None
                 layer_id = self._layer_name_to_id.get(layer_name, 0)
 
@@ -1549,20 +2272,32 @@ class ELMMManager:
                                 self._briskmoe_sacr.remove_expert(layer_id, evicted)
                             if use_elp:
                                 self._briskmoe_elp.remove_expert(layer_id, evicted)
+                    elif use_aces and not cache._free_slots and eid not in cache._slot_map:
+                        # ACES: evict the cached expert with the lowest
+                        # router-probability EMA score.
+                        victim = self._aces.select_victim(
+                            layer_id, list(cache._slot_map.keys()), unique_set
+                        )
+                        new_slot, evicted = cache.alloc_slot_with_victim(eid, victim)
                     else:
-                        new_slot = cache.alloc_slot(eid)
+                        _mu = _utility_map.get(eid, 1.0) if _utility_map else 1.0
+                        new_slot = cache.alloc_slot(eid, utility=_mu)
                     pool_w13, pool_w2 = cache.get_slot_tensors(new_slot)
-                    pool_w13.copy_(w13_ref[eid], non_blocking=True)
-                    pool_w2.copy_(w2_ref[eid], non_blocking=True)
-                    if cache.has_aux_pools:
-                        s13, s2 = cache.get_slot_scale_tensors(new_slot)
-                        b13, b2 = cache.get_slot_bias_tensors(new_slot)
-                        if s13 is not None:
-                            s13.copy_(module.w13_weight_scale[eid], non_blocking=True)
-                            s2.copy_(module.w2_weight_scale[eid], non_blocking=True)
-                        if b13 is not None:
-                            b13.copy_(module.w13_bias[eid], non_blocking=True)
-                            b2.copy_(module.w2_bias[eid], non_blocking=True)
+                    # GPU copies: on _prefetch_stream if HFDE active,
+                    # else default stream.  Eviction above is CPU-only
+                    # (Python dict ops), unaffected by stream context.
+                    with _hfde_ctx:
+                        pool_w13.copy_(w13_ref[eid], non_blocking=True)
+                        pool_w2.copy_(w2_ref[eid], non_blocking=True)
+                        if cache.has_aux_pools:
+                            s13, s2 = cache.get_slot_scale_tensors(new_slot)
+                            b13, b2 = cache.get_slot_bias_tensors(new_slot)
+                            if s13 is not None:
+                                s13.copy_(module.w13_weight_scale[eid], non_blocking=True)
+                                s2.copy_(module.w2_weight_scale[eid], non_blocking=True)
+                            if b13 is not None:
+                                b13.copy_(module.w13_bias[eid], non_blocking=True)
+                                b2.copy_(module.w2_bias[eid], non_blocking=True)
                     miss_slots.append(new_slot)
 
                 # BriskMoE: periodic ELP rebalance
@@ -1573,6 +2308,11 @@ class ELMMManager:
                 self._maybe_profile_end(p3b_tok)
 
                 p3c_tok = self._maybe_profile_start("P3c_copy")
+                # Pool-direct overflow guard: when unique experts exceed
+                # cache capacity, remap has unmapped entries pointing to
+                # slot 0 (wrong weights).  Fall back to scratch path.
+                if use_pool_direct and len(unique_list) > cache._max_slots:
+                    use_pool_direct = False
                 if use_pool_direct:
                     remap = self._remap_table
                     all_eids = hit_eids + miss_eids
@@ -1589,14 +2329,66 @@ class ELMMManager:
                     # Persist to per-layer remap for stale-remap mode
                     if sri > 0 and layer_name in self._layer_remap:
                         lr = self._layer_remap[layer_name]
+
+                        # --- ACES-TASER: proactive remap from EMA ---
+                        # Instead of passively reflecting LRU cache content,
+                        # use ACES EMA top-K to decide which experts SHOULD
+                        # be cached.  Evict low-EMA experts and load high-EMA
+                        # experts that are missing.
+                        if (self.config.aces_taser
+                                and self._aces is not None
+                                and step >= self.config.stale_remap_warmup):
+                            _lid = self._layer_name_to_id.get(layer_name, -1)
+                            if _lid >= 0:
+                                desired = self._aces.get_top_k(_lid, cache._max_slots)
+                                desired_set = set(desired)
+                                cached_set = set(cache._slot_map.keys())
+                                # Experts to load: desired but not cached
+                                to_load = [e for e in desired if e not in cached_set]
+                                # Experts to evict: cached but not desired
+                                # (and not needed this step)
+                                to_evict = [e for e in cache._slot_map
+                                            if e not in desired_set and e not in unique_set]
+                                # Swap: evict one, load one
+                                n_swaps = min(len(to_load), len(to_evict))
+                                for i in range(n_swaps):
+                                    victim_eid = to_evict[i]
+                                    new_eid = to_load[i]
+                                    new_slot, _ = cache.alloc_slot_with_victim(new_eid, victim_eid)
+                                    pool_w13_s, pool_w2_s = cache.get_slot_tensors(new_slot)
+                                    pool_w13_s.copy_(w13_ref[new_eid], non_blocking=True)
+                                    pool_w2_s.copy_(w2_ref[new_eid], non_blocking=True)
+                                    if cache.has_aux_pools:
+                                        s13, s2 = cache.get_slot_scale_tensors(new_slot)
+                                        b13, b2 = cache.get_slot_bias_tensors(new_slot)
+                                        if s13 is not None:
+                                            s13.copy_(module.w13_weight_scale[new_eid], non_blocking=True)
+                                            s2.copy_(module.w2_weight_scale[new_eid], non_blocking=True)
+                                        if b13 is not None:
+                                            b13.copy_(module.w13_bias[new_eid], non_blocking=True)
+                                            b2.copy_(module.w2_bias[new_eid], non_blocking=True)
+
                         # Rebuild remap from the full cache slot_map, not
                         # just the current step's experts.  This ensures
                         # that stale-path lookups for ANY cached expert
-                        # return the correct slot (not the default slot 0
-                        # which could hold a different expert's weights).
-                        lr.fill_(0)
+                        # return the correct slot (not the default -1
+                        # sentinel which means uncached).
+                        lr.fill_(-1)
                         for cached_eid, cached_slot in cache._slot_map.items():
                             lr[cached_eid] = cached_slot
+                        # --- TASER diagnostic: verify remap after rebuild ---
+                        if _taser_debug_layer and step <= 40:
+                            import sys
+                            _n_cached = len(cache._slot_map)
+                            _n_pos = (lr >= 0).sum().item()
+                            _ris = remapped_ids.reshape(-1)
+                            _tis = topk_ids.reshape(-1)
+                            print(f"[TASER-DBG] REBUILD step={step}: cached={_n_cached}, "
+                                  f"remap_pos={_n_pos}, maxslots={cache._max_slots}, "
+                                  f"topk_ids={_tis[:8].tolist()}, "
+                                  f"remapped={_ris[:8].tolist()}, "
+                                  f"hits={step_hits}, misses={step_misses}",
+                                  file=sys.stderr, flush=True)
                         # Remap rebuilt from ground truth → cache is clean
                         self._layer_cache_dirty[layer_name] = False
                         # --- TASER adaptive interval update ---
@@ -1613,18 +2405,86 @@ class ELMMManager:
                             new_interval = sri
                         self._layer_adaptive_interval[layer_name] = new_interval
                         self._layer_next_validation[layer_name] = step + 1 + new_interval
+                        # --- TASER v2: Phase transition checks ---
+                        _tv2_phase = self._taser_phase.get(layer_name)
+                        if _tv2_phase == 'converge':
+                            conv = self._taser_v2_compute_convergence(layer_name)
+                            conv_steps = step - self._converge_start_step.get(layer_name, 0)
+                            if (conv >= self.config.taser_converge_threshold
+                                    or conv_steps > self.config.taser_converge_max_steps):
+                                # Force-load missing hot experts into cache
+                                _hot = self._hot_set.get(layer_name, set())
+                                _cached = set(cache._slot_map.keys())
+                                _missing = _hot - _cached
+                                for _meid in _missing:
+                                    _victim = None
+                                    for _k in cache._slot_map:
+                                        if _k not in _hot:
+                                            _victim = _k
+                                            break
+                                    if _victim is not None:
+                                        _ns, _ = cache.alloc_slot_with_victim(_meid, _victim)
+                                    else:
+                                        _ns = cache.alloc_slot(_meid)
+                                    _pw13, _pw2 = cache.get_slot_tensors(_ns)
+                                    _pw13.copy_(w13_ref[_meid], non_blocking=True)
+                                    _pw2.copy_(w2_ref[_meid], non_blocking=True)
+                                    if cache.has_aux_pools:
+                                        _s13, _s2 = cache.get_slot_scale_tensors(_ns)
+                                        _b13, _b2 = cache.get_slot_bias_tensors(_ns)
+                                        if _s13 is not None:
+                                            _s13.copy_(module.w13_weight_scale[_meid], non_blocking=True)
+                                            _s2.copy_(module.w2_weight_scale[_meid], non_blocking=True)
+                                        if _b13 is not None:
+                                            _b13.copy_(module.w13_bias[_meid], non_blocking=True)
+                                            _b2.copy_(module.w2_bias[_meid], non_blocking=True)
+                                self._taser_v2_freeze_remap(layer_name)
+                                self._taser_phase[layer_name] = 'cruise'
+                                self._miss_ratio_ema[layer_name] = 0.0
+                                if _taser_debug_layer:
+                                    import sys
+                                    _conv2 = self._taser_v2_compute_convergence(layer_name)
+                                    print(f"[TASER-v2] {layer_name} → CRUISE at step={step}, "
+                                          f"convergence={conv:.2f}→{_conv2:.2f}, "
+                                          f"force_loaded={len(_missing)}, "
+                                          f"hot_set_size={len(self._hot_set.get(layer_name, set()))}",
+                                          file=sys.stderr, flush=True)
+                        elif _tv2_phase == 'cruise':
+                            # CRUISE validation step: refresh remap from
+                            # current cache state.  The slow path just ran,
+                            # so the cache is up-to-date.
+                            self._taser_v2_freeze_remap(layer_name)
                 else:
                     # Standard Scratchpad Mode (fallback)
-                    scratch_w13 = self._scratch_w13[:meta["w13_shape"][0]]
-                    scratch_w2 = self._scratch_w2[:meta["w2_shape"][0]]
-                    for eid, slot in zip(hit_eids, hit_slots):
-                        pool_w13, pool_w2 = cache.get_slot_tensors(slot)
-                        scratch_w13[eid].copy_(pool_w13, non_blocking=True)
-                        scratch_w2[eid].copy_(pool_w2, non_blocking=True)
-                    for eid, slot in zip(miss_eids, miss_slots):
-                        pool_w13, pool_w2 = cache.get_slot_tensors(slot)
-                        scratch_w13[eid].copy_(pool_w13, non_blocking=True)
-                        scratch_w2[eid].copy_(pool_w2, non_blocking=True)
+                    if self._scratchpad_on_gpu:
+                        scratch_w13 = self._scratch_w13[:meta["w13_shape"][0]]
+                        scratch_w2 = self._scratch_w2[:meta["w2_shape"][0]]
+                        if len(unique_list) > cache._max_slots:
+                            # Pool overflow: copy directly from UVA to scratch,
+                            # bypassing cache (whose slots were corrupted by
+                            # eviction during miss-loading).
+                            w13_ref_sc = module.w13_weight
+                            w2_ref_sc = module.w2_weight
+                            for eid in unique_list:
+                                scratch_w13[eid].copy_(w13_ref_sc[eid],
+                                                       non_blocking=True)
+                                scratch_w2[eid].copy_(w2_ref_sc[eid],
+                                                      non_blocking=True)
+                        else:
+                            for eid, slot in zip(hit_eids, hit_slots):
+                                pool_w13, pool_w2 = cache.get_slot_tensors(slot)
+                                scratch_w13[eid].copy_(pool_w13, non_blocking=True)
+                                scratch_w2[eid].copy_(pool_w2, non_blocking=True)
+                            for eid, slot in zip(miss_eids, miss_slots):
+                                pool_w13, pool_w2 = cache.get_slot_tensors(slot)
+                                scratch_w13[eid].copy_(pool_w13, non_blocking=True)
+                                scratch_w2[eid].copy_(pool_w2, non_blocking=True)
+                    else:
+                        # Scratchpad-free mode (pool-direct): kernel will
+                        # use original UVA weights directly (slow but rare,
+                        # only during prefill overflow).
+                        scratch_w13 = None
+                        scratch_w2 = None
                 self._maybe_profile_end(p3c_tok)
 
                 self._total_cache_hits += step_hits
@@ -1639,6 +2499,15 @@ class ELMMManager:
                 alpha = self.config.hit_rate_ema_alpha
                 old = self._hit_rate_ema.get(layer_name, 0.5)
                 self._hit_rate_ema[layer_name] = (1 - alpha) * old + alpha * inst_rate
+
+            # Entropy-Aware Budget (P4): track unique experts per step
+            if self.config.enable_entropy_budget:
+                n_unique = int(topk_ids.reshape(-1).unique().numel())
+                gamma = self.config.entropy_ema_gamma
+                old_ue = self._unique_experts_ema.get(layer_name, float(n_unique))
+                self._unique_experts_ema[layer_name] = (
+                    (1 - gamma) * old_ue + gamma * n_unique
+                )
 
             self._rebalance_step += 1
             if (self.config.rebalance_interval > 0
@@ -1661,96 +2530,299 @@ class ELMMManager:
 
         M = hidden_states.shape[0]
 
-        # --- ALPS Phase 2: Oracle cross-layer prefetch ---
-        # While this layer's MoE kernel runs (HBM-bound), prefetch
-        # experts for the next layer via PCIe on _prefetch_stream.
-        if self.config.enable_oracle_prefetch and self._ordered_layers:
-            self._oracle_prefetch_next_layer(layer_name)
+        if taser_v2_dual_rail and _taser_v2_miss_data is not None:
+            # === TASER v2 Dual-Rail: Hit → pool-direct, Miss → HFDE async ===
+            _dr_remapped, _dr_is_miss, _dr_miss_list = _taser_v2_miss_data
 
-        # --- ALPS Phase 1: CUDA Graph replay for stale path ---
-        use_graph = (
-            self._use_cuda_graph
-            and stale_remap_ok
-            and layer_name in self._layer_graphs
-            and M == self._graph_M
-        )
+            # Async load miss experts on prefetch_stream
+            _dr_stream = self._prefetch_stream
+            _dr_stream.wait_stream(torch.cuda.current_stream())
 
-        if use_graph:
-            # CUDA Graph fast path (~99% of decode steps after warmup)
-            self._graph_replay_count += 1
-            final_hidden = self._layer_graphs[layer_name].replay(
-                hidden_states, topk_weights, remapped_ids,
-            )
-        else:
-            self._graph_eager_count += 1
-            use_direct = (
+            w13_ref = module.w13_weight
+            w2_ref = module.w2_weight
+            _dr_miss_slots = {}
+            hot_set = self._hot_set.get(layer_name, set())
+
+            with torch.cuda.stream(_dr_stream):
+                for eid in _dr_miss_list:
+                    # Check if already cached
+                    existing_slot = cache.get(eid)
+                    if existing_slot is not None:
+                        _dr_miss_slots[eid] = existing_slot
+                        continue
+                    # Alloc slot: prefer evicting non-hot experts
+                    if not cache._free_slots:
+                        victim = None
+                        for k in cache._slot_map:
+                            if k not in hot_set:
+                                victim = k
+                                break
+                        if victim is not None:
+                            new_slot, _ = cache.alloc_slot_with_victim(eid, victim)
+                        else:
+                            new_slot = cache.alloc_slot(eid)
+                    else:
+                        new_slot = cache.alloc_slot(eid)
+                    pool_w13, pool_w2 = cache.get_slot_tensors(new_slot)
+                    pool_w13.copy_(w13_ref[eid], non_blocking=True)
+                    pool_w2.copy_(w2_ref[eid], non_blocking=True)
+                    if cache.has_aux_pools:
+                        s13, s2 = cache.get_slot_scale_tensors(new_slot)
+                        b13, b2 = cache.get_slot_bias_tensors(new_slot)
+                        if s13 is not None:
+                            s13.copy_(module.w13_weight_scale[eid], non_blocking=True)
+                            s2.copy_(module.w2_weight_scale[eid], non_blocking=True)
+                        if b13 is not None:
+                            b13.copy_(module.w13_bias[eid], non_blocking=True)
+                            b2.copy_(module.w2_bias[eid], non_blocking=True)
+                    _dr_miss_slots[eid] = new_slot
+
+            # Pass 1: Hit experts (default stream, overlaps with PCIe)
+            # Find a safe redirect slot from any hit position
+            _dr_hit_mask = ~_dr_is_miss
+            _dr_hit_remapped = _dr_remapped[_dr_hit_mask].reshape(-1)
+            safe_slot = _dr_hit_remapped[0].item() if _dr_hit_remapped.numel() > 0 else 0
+
+            hit_remapped = _dr_remapped.clone()
+            hit_remapped[_dr_is_miss] = safe_slot
+            hit_w = topk_weights.clone()
+            hit_w[_dr_is_miss] = 0.0
+
+            # Choose kernel path: direct dispatch or quant_method.apply
+            _dr_use_dd = (
                 self.config.enable_direct_dispatch
-                and use_pool_direct
                 and self._dd_invoke_kernel is not None
                 and M <= self._dd_max_M
             )
-
-            if use_direct:
-                # === Direct Triton Dispatch (bypass quant_method.apply chain) ===
-                final_hidden = self._direct_dispatch_kernel(
-                    hidden_states, topk_weights, remapped_ids, cache, module,
+            if _dr_use_dd:
+                hit_output = self._direct_dispatch_kernel(
+                    hidden_states, hit_w, hit_remapped, cache, module,
                 )
             else:
-                # === Original path via quant_method.apply ===
-                orig_w13_data = module.w13_weight.data
-                orig_w2_data = module.w2_weight.data
-                orig_w13_scale = None
-                orig_w2_scale = None
-                orig_w13_bias = None
-                orig_w2_bias = None
-
-                if use_pool_direct:
-                    module.w13_weight.data = cache._w13_pool
-                    module.w2_weight.data = cache._w2_pool
-                    # Swap scale/bias pools for quantized models
-                    if cache._w13_scale_pool is not None:
-                        orig_w13_scale = module.w13_weight_scale.data
-                        orig_w2_scale = module.w2_weight_scale.data
-                        module.w13_weight_scale.data = cache._w13_scale_pool
-                        module.w2_weight_scale.data = cache._w2_scale_pool
-                    if cache._w13_bias_pool is not None:
-                        orig_w13_bias = module.w13_bias.data
-                        orig_w2_bias = module.w2_bias.data
-                        module.w13_bias.data = cache._w13_bias_pool
-                        module.w2_bias.data = cache._w2_bias_pool
-                    kernel_topk_ids = remapped_ids
-                    # Match vLLM expert_cache.py: adjust global_num_experts
-                    # so moe_align_block_size uses pool slot count instead
-                    # of full expert count (128).  Use the PHYSICAL pool
-                    # size (w13_pool.shape[0]) rather than the logical
-                    # _max_slots, because adaptive rebalancing can shrink
-                    # _max_slots below slot indices that TASER stale remap
-                    # already references.  The physical pool never resizes.
-                    orig_num_experts = module.global_num_experts
-                    module.global_num_experts = cache._w13_pool.shape[0]
-                else:
-                    module.w13_weight.data = scratch_w13
-                    module.w2_weight.data = scratch_w2
-                    kernel_topk_ids = topk_ids
-
+                # Weight-swap path: swap module weights to pool, run kernel
+                _dr_orig_w13 = module.w13_weight.data
+                _dr_orig_w2 = module.w2_weight.data
+                _dr_orig_ne = module.global_num_experts
+                _dr_orig_s13 = None
+                _dr_orig_s2 = None
+                _dr_orig_b13 = None
+                _dr_orig_b2 = None
+                module.w13_weight.data = cache._w13_pool
+                module.w2_weight.data = cache._w2_pool
+                if cache._w13_scale_pool is not None:
+                    _dr_orig_s13 = module.w13_weight_scale.data
+                    _dr_orig_s2 = module.w2_weight_scale.data
+                    module.w13_weight_scale.data = cache._w13_scale_pool
+                    module.w2_weight_scale.data = cache._w2_scale_pool
+                if cache._w13_bias_pool is not None:
+                    _dr_orig_b13 = module.w13_bias.data
+                    _dr_orig_b2 = module.w2_bias.data
+                    module.w13_bias.data = cache._w13_bias_pool
+                    module.w2_bias.data = cache._w2_bias_pool
+                module.global_num_experts = cache._w13_pool.shape[0]
                 try:
-                    final_hidden = module.quant_method.apply(
-                        layer=module,
-                        x=hidden_states,
-                        topk_weights=topk_weights,
-                        topk_ids=kernel_topk_ids,
+                    hit_output = module.quant_method.apply(
+                        layer=module, x=hidden_states,
+                        topk_weights=hit_w, topk_ids=hit_remapped,
                     )
                 finally:
-                    module.w13_weight.data = orig_w13_data
-                    module.w2_weight.data = orig_w2_data
-                    if orig_w13_scale is not None:
-                        module.w13_weight_scale.data = orig_w13_scale
-                        module.w2_weight_scale.data = orig_w2_scale
-                    if orig_w13_bias is not None:
-                        module.w13_bias.data = orig_w13_bias
-                        module.w2_bias.data = orig_w2_bias
+                    module.w13_weight.data = _dr_orig_w13
+                    module.w2_weight.data = _dr_orig_w2
+                    module.global_num_experts = _dr_orig_ne
+                    if _dr_orig_s13 is not None:
+                        module.w13_weight_scale.data = _dr_orig_s13
+                        module.w2_weight_scale.data = _dr_orig_s2
+                    if _dr_orig_b13 is not None:
+                        module.w13_bias.data = _dr_orig_b13
+                        module.w2_bias.data = _dr_orig_b2
+
+            # Wait for miss loading
+            torch.cuda.current_stream().wait_stream(_dr_stream)
+            self._prefetch_in_flight = False
+
+            # Build miss remapped: fill miss positions with loaded slot ids
+            miss_remapped = _dr_remapped.clone()
+            for eid, slot in _dr_miss_slots.items():
+                miss_remapped[topk_ids == eid] = slot
+            miss_remapped[_dr_hit_mask] = safe_slot
+            miss_w = topk_weights.clone()
+            miss_w[_dr_hit_mask] = 0.0
+
+            if _dr_use_dd:
+                miss_output = self._direct_dispatch_kernel(
+                    hidden_states, miss_w, miss_remapped, cache, module,
+                )
+            else:
+                module.w13_weight.data = cache._w13_pool
+                module.w2_weight.data = cache._w2_pool
+                if cache._w13_scale_pool is not None:
+                    module.w13_weight_scale.data = cache._w13_scale_pool
+                    module.w2_weight_scale.data = cache._w2_scale_pool
+                if cache._w13_bias_pool is not None:
+                    module.w13_bias.data = cache._w13_bias_pool
+                    module.w2_bias.data = cache._w2_bias_pool
+                module.global_num_experts = cache._w13_pool.shape[0]
+                try:
+                    miss_output = module.quant_method.apply(
+                        layer=module, x=hidden_states,
+                        topk_weights=miss_w, topk_ids=miss_remapped,
+                    )
+                finally:
+                    module.w13_weight.data = _dr_orig_w13
+                    module.w2_weight.data = _dr_orig_w2
+                    module.global_num_experts = _dr_orig_ne
+                    if _dr_orig_s13 is not None:
+                        module.w13_weight_scale.data = _dr_orig_s13
+                        module.w2_weight_scale.data = _dr_orig_s2
+                    if _dr_orig_b13 is not None:
+                        module.w13_bias.data = _dr_orig_b13
+                        module.w2_bias.data = _dr_orig_b2
+
+            final_hidden = hit_output + miss_output
+
+            # Mark cache dirty: miss loading may have evicted hot experts,
+            # so lr remap needs refresh on next validation step.
+            self._layer_cache_dirty[layer_name] = True
+
+        elif hfde_active:
+            self._hfde_active_count += 1
+            # === HFDE: Hit-First Disaggregated Execution ===
+            # Two-pass kernel: overlap miss loading (PCIe, _prefetch_stream)
+            # with hit expert compute (GPU HBM, default stream).
+            #
+            # Math: output = Σ_hits(w_i·E_i(x)) + Σ_misses(w_j·E_j(x))
+            # The two sums are computed independently and added.
+            #
+            # Safety: hit pass redirects miss positions to a valid hit slot
+            # with w=0, so the kernel only reads from HIT slots (no data
+            # race with _prefetch_stream writing to MISS slots).
+
+            # Build miss mask on GPU (no sync — all ops are GPU-side)
+            remap_size = self._remap_table.shape[0]
+            _dev = topk_ids.device
+            miss_indicator = torch.zeros(remap_size, dtype=torch.bool, device=_dev)
+            _miss_t = torch.tensor(miss_eids, dtype=torch.long, device=_dev)
+            miss_indicator.scatter_(0, _miss_t, True)
+            is_miss = miss_indicator[topk_ids]  # [M, top_k]
+
+            # Safe redirect: first hit expert's slot (valid data, in cache)
+            safe_slot = hit_slots[0]
+
+            # --- Pass 1: Hit experts (default stream, overlaps with PCIe) ---
+            hit_remapped = remapped_ids.clone()
+            hit_remapped[is_miss] = safe_slot  # redirect misses to valid slot
+            hit_w = topk_weights.clone()
+            hit_w[is_miss] = 0.0  # zero contribution from redirected misses
+
+            hit_output = self._direct_dispatch_kernel(
+                hidden_states, hit_w, hit_remapped, cache, module,
+            )
+
+            # --- Wait for miss loading on _prefetch_stream ---
+            torch.cuda.current_stream().wait_stream(self._prefetch_stream)
+            self._prefetch_in_flight = False
+
+            # --- Pass 2: Miss experts (miss data now in pool) ---
+            miss_remapped = remapped_ids.clone()
+            miss_remapped[~is_miss] = safe_slot  # redirect hits to any valid slot
+            miss_w = topk_weights.clone()
+            miss_w[~is_miss] = 0.0  # zero contribution from hit experts
+
+            miss_output = self._direct_dispatch_kernel(
+                hidden_states, miss_w, miss_remapped, cache, module,
+            )
+
+            final_hidden = hit_output + miss_output
+
+            # Oracle prefetch: skip this layer (_prefetch_stream was busy).
+            # Next layer will benefit from TASER stale path instead.
+        else:
+            # --- Original Phase 4 path ---
+            # ALPS Phase 2: Oracle cross-layer prefetch
+            if self.config.enable_oracle_prefetch and self._ordered_layers:
+                self._oracle_prefetch_next_layer(layer_name, topk_ids)
+
+            # ALPS Phase 1: CUDA Graph replay for stale path
+            use_graph = (
+                self._use_cuda_graph
+                and stale_remap_ok
+                and layer_name in self._layer_graphs
+                and M == self._graph_M
+            )
+
+            if use_graph:
+                # CUDA Graph fast path (~99% of decode steps after warmup)
+                self._graph_replay_count += 1
+                final_hidden = self._layer_graphs[layer_name].replay(
+                    hidden_states, topk_weights, remapped_ids,
+                )
+            else:
+                self._graph_eager_count += 1
+                use_direct = (
+                    self.config.enable_direct_dispatch
+                    and use_pool_direct
+                    and self._dd_invoke_kernel is not None
+                    and M <= self._dd_max_M
+                )
+
+                if use_direct:
+                    self._dd_active_count += 1
+                    # === Direct Triton Dispatch (bypass quant_method.apply chain) ===
+                    final_hidden = self._direct_dispatch_kernel(
+                        hidden_states, topk_weights, remapped_ids, cache, module,
+                    )
+                else:
+                    # === Original path via quant_method.apply ===
+                    orig_w13_data = module.w13_weight.data
+                    orig_w2_data = module.w2_weight.data
+                    orig_w13_scale = None
+                    orig_w2_scale = None
+                    orig_w13_bias = None
+                    orig_w2_bias = None
+
                     if use_pool_direct:
-                        module.global_num_experts = orig_num_experts
+                        module.w13_weight.data = cache._w13_pool
+                        module.w2_weight.data = cache._w2_pool
+                        # Swap scale/bias pools for quantized models
+                        if cache._w13_scale_pool is not None:
+                            orig_w13_scale = module.w13_weight_scale.data
+                            orig_w2_scale = module.w2_weight_scale.data
+                            module.w13_weight_scale.data = cache._w13_scale_pool
+                            module.w2_weight_scale.data = cache._w2_scale_pool
+                        if cache._w13_bias_pool is not None:
+                            orig_w13_bias = module.w13_bias.data
+                            orig_w2_bias = module.w2_bias.data
+                            module.w13_bias.data = cache._w13_bias_pool
+                            module.w2_bias.data = cache._w2_bias_pool
+                        kernel_topk_ids = remapped_ids
+                        orig_num_experts = module.global_num_experts
+                        module.global_num_experts = cache._w13_pool.shape[0]
+                    else:
+                        if scratch_w13 is not None:
+                            module.w13_weight.data = scratch_w13
+                            module.w2_weight.data = scratch_w2
+                        # else: scratchpad-free mode — keep original UVA
+                        # weights; kernel reads via PCIe (rare fallback)
+                        kernel_topk_ids = topk_ids
+
+                    try:
+                        final_hidden = module.quant_method.apply(
+                            layer=module,
+                            x=hidden_states,
+                            topk_weights=topk_weights,
+                            topk_ids=kernel_topk_ids,
+                        )
+                    finally:
+                        module.w13_weight.data = orig_w13_data
+                        module.w2_weight.data = orig_w2_data
+                        if orig_w13_scale is not None:
+                            module.w13_weight_scale.data = orig_w13_scale
+                            module.w2_weight_scale.data = orig_w2_scale
+                        if orig_w13_bias is not None:
+                            module.w13_bias.data = orig_w13_bias
+                            module.w2_bias.data = orig_w2_bias
+                        if use_pool_direct:
+                            module.global_num_experts = orig_num_experts
 
         # --- Phase 5: Shared experts ---
         self._maybe_profile_end(p_tok)
@@ -1769,6 +2841,17 @@ class ELMMManager:
         # --- Optional logging ---
         self._maybe_profile_end(p_tok)
         self._maybe_profile_report()
+        # LDR stats: periodic summary
+        if (self._total_intercepts > 0
+                and self._total_intercepts % 1000 == 0):
+            ldr_fast = getattr(self, '_ldr_fast_count', 0)
+            ldr_conflict = getattr(self, '_ldr_conflict_count', 0)
+            if ldr_fast + ldr_conflict > 0:
+                import sys
+                print(f"[ELMM] LDR stats@{self._total_intercepts}: "
+                      f"fast={ldr_fast}, conflict={ldr_conflict}, "
+                      f"rate={ldr_fast/(ldr_fast+ldr_conflict)*100:.1f}%",
+                      file=sys.stderr, flush=True)
         if (self.config.log_interval > 0
                 and self._total_intercepts % self.config.log_interval == 0):
             self.log_stats()
@@ -1789,6 +2872,133 @@ class ELMMManager:
             self._briskmoe_step += 1
         if self._pred_cache is not None:
             self._pred_cache.advance_step()
+
+        # --- v3.1 C6: Step feedback for overflow controller ---
+        if self._overflow_controller is not None:
+            cache = self._layer_caches.get(layer_name)
+            _c6_evictions = cache._evictions if cache else 0
+            self._overflow_controller.on_layer_complete(
+                layer_name, step_hits, step_misses, _c6_evictions,
+            )
+            # Finalize step after last offloaded layer
+            if (self._ordered_layers
+                    and layer_name == self._ordered_layers[-1]):
+                self._overflow_controller.on_step_complete()
+
+        return final_hidden
+
+    # -----------------------------------------------------------------------
+    # Unified Scheduling Framework (D1-D6) per-layer forward
+    # -----------------------------------------------------------------------
+
+    def _unified_forward_layer(
+        self,
+        layer_name: str,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        module: nn.Module,
+    ) -> torch.Tensor:
+        """
+        Unified scheduling pipeline for one layer.
+
+        Runs D1→D2→D6→D4→D5 pipeline:
+          1. Governor decides K, pattern, aggressiveness
+          2. VerifyScheduler decomposes into substeps
+          3. PrefetchPlanner classifies experts per substep
+          4. ResidencyManager allocates/pins slots
+          5. HeadTailExecutor runs head+tail dual-stage kernel
+          6. Stats feedback to Governor
+        """
+        from adapters.prefetch_planner import PrefetchPlanner
+
+        residency = self._unified_residency
+        governor = self._unified_governor
+        scheduler = self._unified_scheduler
+        executor = self._unified_executor
+
+        # Track which layer we're on (for per-step Governor feedback)
+        layer_idx = self._layer_name_to_id.get(layer_name, 0)
+        is_first_layer = (layer_idx == 0)
+        is_last_layer = (layer_idx == len(self._ordered_layers) - 1
+                         if self._ordered_layers else True)
+
+        # D1: Governor decide (once per step, on first layer)
+        if is_first_layer:
+            self._unified_step_count += 1
+            self._unified_current_decision = governor.decide()
+
+        decision = self._unified_current_decision
+
+        # D2: VerifyScheduler plan substeps
+        scheduler.set_pattern(decision.verify_pattern)
+        plan = scheduler.plan(topk_ids, residency_manager=residency)
+
+        # Classify experts for this layer
+        unique_experts = topk_ids.reshape(-1).unique().tolist()
+        full_list, partial_list, cold_list = residency.classify_experts(
+            layer_name, unique_experts
+        )
+
+        # Track head coverage for stats
+        head_hits = len(full_list) + len(partial_list)
+        total_needed = len(unique_experts)
+
+        # D6: PrefetchPlanner — create per-substep plan
+        planner = PrefetchPlanner(
+            residency=residency,
+            stats=governor.stats,
+            max_pcie_budget_bytes=self.config.unified_tail_slots
+                * self._unified_split_config.tail_expert_bytes,
+            tail_bytes=self._unified_split_config.tail_expert_bytes,
+        )
+        step_plan = planner.plan(
+            plan,
+            aggressiveness=decision.prefetch_aggressiveness,
+            layer=layer_name,
+        )
+
+        # D6+D4: Execute prefetch plan (load tails for hard/soft experts)
+        loaded_experts = planner.execute_plan(
+            step_plan, layer=layer_name, stream=self._prefetch_stream
+        )
+
+        # Sync prefetch stream before execution
+        if self._prefetch_stream is not None and loaded_experts:
+            torch.cuda.current_stream().wait_stream(self._prefetch_stream)
+
+        # D4: Touch and step
+        residency.touch_experts(layer_name, unique_experts)
+        residency.step(layer_name)
+
+        # D5: HeadTailExecutor forward
+        final_hidden = executor.forward(
+            hidden_states, topk_weights, topk_ids, residency, layer_name
+        )
+
+        # D4: Release any substep reservations
+        for ss in plan.substeps:
+            residency.release_substep_reservation(layer_name, ss.substep_id)
+
+        # Determine readiness: did this layer need fallback?
+        # Fallback = any cold expert with no loaded tail
+        tail_ready_count = len(loaded_experts) + len(full_list)
+        fell_back = len(cold_list) > 0 and not loaded_experts
+
+        # D1: Governor feedback (once per step, on last layer)
+        if is_last_layer:
+            if fell_back:
+                self._unified_fallback_count += 1
+            else:
+                self._unified_ready_count += 1
+            governor.on_step_complete(
+                fell_back=fell_back,
+                accepted_tokens=topk_ids.shape[0],  # M tokens
+                unique_experts=total_needed,
+                head_hits=head_hits,
+                tail_ready_count=tail_ready_count,
+                total_needed=total_needed,
+            )
 
         return final_hidden
 
@@ -1977,6 +3187,16 @@ class ELMMManager:
         if cache is None:
             return
 
+        # --- CFDB: Cache-Full DIPP Bypass ---
+        # When the cache is fully occupied, any prefetch of uncached
+        # experts requires eviction.  Profiling shows DIPP evictions
+        # always conflict with verify-step routing (100% LDR conflict
+        # rate), because the evicted expert is typically still needed.
+        # This forces TASER slow path, costing ~3.5ms per dirty layer.
+        # Skip prefetch entirely when cache is full.
+        if not cache._free_slots:
+            return
+
         stream = self._prefetch_stream or torch.cuda.current_stream()
         module = self._patched_modules.get(layer_name)
         if module is None:
@@ -2007,7 +3227,7 @@ class ELMMManager:
                             candidates = list(cache._slot_map.keys())
                         victim = self._briskmoe_sacr.select_victim(layer_id, candidates)
                         if remap_tbl is not None:
-                            remap_tbl[victim] = 0
+                            remap_tbl[victim] = -1
                         slot, evicted = cache.alloc_slot_with_victim(eid, victim)
                         if evicted is not None:
                             self._briskmoe_sacr.remove_expert(layer_id, evicted)
@@ -2016,7 +3236,7 @@ class ELMMManager:
                     else:
                         evict_eid = next(iter(cache._slot_map))
                         if remap_tbl is not None:
-                            remap_tbl[evict_eid] = 0
+                            remap_tbl[evict_eid] = -1
                         # Allocate a cache slot and H2D copy from UVA weight
                         slot = cache.alloc_slot(eid)
                 else:
@@ -2038,8 +3258,10 @@ class ELMMManager:
                     remap_tbl[eid] = slot
                 self._pending_prefetch[layer_name].add(eid)
         self._prefetch_in_flight = True
-        # Mark layer dirty so TASER skips the fast path and validates
+        # Mark layer dirty so TASER validates.  LDR flag enables the
+        # lightweight conflict check instead of forcing full slow path.
         self._layer_cache_dirty[layer_name] = True
+        self._layer_dirty_from_dipp[layer_name] = True
 
     def prefetch_for_draft_routing(
         self,
@@ -2142,7 +3364,15 @@ class ELMMManager:
         weights = {}
         for name, ema in self._hit_rate_ema.items():
             # miss_rate as weight — layers that miss more need more capacity
-            weights[name] = max(0.01, 1.0 - ema)
+            miss_w = max(0.01, 1.0 - ema)
+            # Entropy-Aware Budget (P4): scale by demand/capacity ratio
+            if self.config.enable_entropy_budget and name in self._unique_experts_ema:
+                ue = self._unique_experts_ema[name]
+                slots = self._layer_caches[name]._max_slots if name in self._layer_caches else 23
+                entropy_factor = (ue / max(slots, 1)) ** self.config.entropy_kappa
+                weights[name] = miss_w * entropy_factor
+            else:
+                weights[name] = miss_w
 
         total_weight = sum(weights.values())
         if total_weight <= 0:
@@ -2175,6 +3405,11 @@ class ELMMManager:
                 cache.resize(target)
                 # Mark dirty — remap table may reference evicted slots
                 self._layer_cache_dirty[name] = True
+                # Force immediate TASER validation so CRUISE takes
+                # slow-path next step (v1 behavior: heal cache immediately
+                # instead of deferring to next periodic validation).
+                step = self._layer_remap_step.get(name, 0)
+                self._layer_next_validation[name] = step
                 resized += 1
 
         if resized > 0:
@@ -2188,6 +3423,43 @@ class ELMMManager:
     # -----------------------------------------------------------------------
     # Locality Data Export
     # -----------------------------------------------------------------------
+
+    def _dump_overlap_history(self):
+        """Auto-dump overlap history to JSON (called via atexit)."""
+        path = self._overlap_dump_path
+        if not path or not self._overlap_history:
+            return
+        import json as _json
+        from pathlib import Path
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        data = {}
+        for name, hist in sorted(self._overlap_history.items()):
+            if hist:
+                import numpy as _np
+                arr = _np.array(hist)
+                data[name] = {
+                    "n": len(arr),
+                    "mean": float(arr.mean()),
+                    "std": float(arr.std()),
+                    "min": float(arr.min()),
+                    "p5": float(_np.percentile(arr, 5)),
+                    "p25": float(_np.percentile(arr, 25)),
+                    "median": float(_np.percentile(arr, 50)),
+                    "p75": float(_np.percentile(arr, 75)),
+                    "p95": float(_np.percentile(arr, 95)),
+                    "p99": float(_np.percentile(arr, 99)),
+                    "max": float(arr.max()),
+                    "pct_ge_90": float((arr >= 0.90).mean() * 100),
+                    "pct_ge_95": float((arr >= 0.95).mean() * 100),
+                    "pct_ge_99": float((arr >= 0.99).mean() * 100),
+                    "pct_eq_100": float((arr >= 1.0).mean() * 100),
+                    "values": hist,
+                }
+        with open(path, "w") as f:
+            _json.dump(data, f, indent=2)
+        print(f"[ELMM] Overlap history dumped to {path} "
+              f"({sum(len(v) for v in self._overlap_history.values())} samples)",
+              file=sys.stderr, flush=True)
 
     def export_locality_data(self, output_dir: str = ""):
         """
@@ -2316,6 +3588,45 @@ class ELMMManager:
             stats["oracle_prefetch"] = {
                 "issued": self._oracle_prefetch_issued,
                 "skipped": self._oracle_prefetch_skipped,
+            }
+        # DD / HFDE stats
+        stats["dd_active_count"] = self._dd_active_count
+        stats["hfde_active_count"] = self._hfde_active_count
+        if self._total_intercepts > 0:
+            stats["hfde_activation_rate"] = round(
+                self._hfde_active_count / self._total_intercepts, 4
+            )
+            stats["dd_activation_rate"] = round(
+                self._dd_active_count / self._total_intercepts, 4
+            )
+        # TASER v2 stats
+        _tv2_fast = getattr(self, '_taser_fast_count', 0)
+        _tv2_slow = getattr(self, '_taser_slow_count', 0)
+        if _tv2_fast + _tv2_slow + self._taser_v2_dual_rail_count > 0:
+            stats["taser_v2"] = {
+                "fast_pure": _tv2_fast,
+                "cruise_pure": self._taser_v2_cruise_count,
+                "dual_rail": self._taser_v2_dual_rail_count,
+                "slow": _tv2_slow,
+                "drift": self._taser_v2_drift_count,
+                "phases": {n: p for n, p in list(self._taser_phase.items())[:3]},
+            }
+        # Unified scheduling (D1-D6) stats
+        if self.config.enable_unified_scheduling and self._unified_governor is not None:
+            gov = self._unified_governor
+            gov_diag = gov.get_diagnostics()
+            total_steps = self._unified_step_count
+            stats["unified"] = {
+                "enabled": True,
+                "steps": total_steps,
+                "fallback_count": self._unified_fallback_count,
+                "ready_count": self._unified_ready_count,
+                "fallback_ratio": round(self._unified_fallback_count / max(total_steps, 1), 4),
+                "ready_ratio": round(self._unified_ready_count / max(total_steps, 1), 4),
+                "governor_K": gov_diag.get("current_K", -1),
+                "governor_fallback_ema": round(gov_diag.get("fallback_ratio_ema", 0), 4),
+                "governor_coverage_ema": round(gov_diag.get("head_coverage_ema", 0), 4),
+                "executor_stats": self._unified_executor.get_stats() if self._unified_executor else {},
             }
         return stats
 

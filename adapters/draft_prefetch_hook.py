@@ -61,6 +61,8 @@ class DraftPrefetchHook:
             result = hook._original_propose(self_proposer, *args, **kwargs)
             # After draft tokens are proposed, trigger prefetch
             hook._on_draft_complete(self_proposer)
+            # v3.1: Overflow controller (C1-C4 + C3 K adjustment)
+            hook._run_overflow_controller(self_proposer)
             return result
 
         EagleProposer.propose = patched_propose
@@ -171,6 +173,41 @@ class DraftPrefetchHook:
                     uncached = [e for e in last_experts if not cache.contains(e)]
                     if uncached:
                         elmm.prefetch_experts(layer_name, uncached[:8])
+
+    def _run_overflow_controller(self, proposer: Any):
+        """v3.1: Run C1→C2→C3→C4→C5 after draft completes.
+
+        C3 adjusts proposer.num_speculative_tokens for the NEXT step.
+        C4/C5 act on the CURRENT step (prefetch + pin).
+        """
+        elmm = self._elmm
+        controller = getattr(elmm, '_overflow_controller', None)
+        if controller is None or not controller.enabled:
+            return
+
+        # Build draft_routing from _last_expert_set
+        # Format: {layer_idx: [expert_ids]}
+        draft_routing: dict[int, list[int]] = {}
+        for layer_name, experts in elmm._last_expert_set.items():
+            if experts:
+                layer_id = elmm._layer_name_to_id.get(layer_name, -1)
+                if layer_id >= 0:
+                    draft_routing[layer_id] = list(experts)
+
+        if not draft_routing:
+            return
+
+        # Run C1→C2→C3→C4→C5
+        report = controller.on_draft_complete(draft_routing)
+
+        # C3: K adjustment tracking (for metrics only).
+        # NOTE: Modifying proposer.num_speculative_tokens at runtime is
+        # unsafe — vLLM pre-allocates draft_token_ids_cpu, attention masks,
+        # and KV-cache slots at init time with the original K. Changing K
+        # mid-stream causes CUDA index-out-of-bounds in IndexKernel.cu.
+        # For now, C3 computes the recommended K but does NOT apply it.
+        # Future: integrate with vLLM's SpecConfig.update() if available.
+        _ = controller.get_recommended_K()  # tracked internally by C3
 
     def uninstall(self):
         """Restore original propose method."""

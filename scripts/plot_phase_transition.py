@@ -19,7 +19,7 @@ import numpy as np
 RESULT_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "results", "phase_transition"
 )
-OFFLOAD_VALUES = [20, 25, 30, 35, 40, 45]
+OFFLOAD_VALUES = [0, 10, 20, 30, 35, 40, 45]
 MODEL_SIZE_GB = 57.0  # Qwen3-30B-A3B in BF16 (approximate)
 
 
