@@ -1,0 +1,2230 @@
+arXiv:2510.10302v2 [cs.DC] 6 Nov 2025
+
+SP-MoE: Speculative Decoding and Prefetching for
+Accelerating MoE-based Model Inference
+Liangkun Chen
+
+Zijian Wen
+
+Tian Wu
+
+Sun Yat-sen University
+Guangzhou, China
+
+Sun Yat-sen University
+Guangzhou, China
+
+Sun Yat-sen University
+Guangzhou, China
+
+Xiaoxi Zhang
+
+Chuan Wu
+
+Sun Yat-sen University
+Guangzhou, China
+
+The University of Hong Kong
+Hong Kong, China
+
+Abstract
+
+Verification Strategy
+
+The Mixture-of-Experts (MoE) architecture has been widely
+adopted in large language models (LLMs) to reduce computation cost through model sparsity. Employing speculative decoding (SD) can further accelerate MoE inference
+by drafting multiple tokens per step and verifying them in
+parallel. However, combining MoE with SD inflates GPU
+memory and aggravates CPU–GPU bandwidth contention
+during multi-token verification. Existing MoE offloading systems are SD-agnostic and do not address this bottleneck. We
+present SP-MoE, the first SD-aware expert-offloading and
+compute–communication pipelining framework. SP-MoE
+introduces: (1) speculative expert prefetching that exploits
+structural correspondence between the draft and target models to prefetch likely experts ahead of verification; (2) a
+cutoff-layer policy that bounds per-layer prefetch depth
+based on empirical profiles and an analytical latency model,
+guaranteeing just-in-time availability without overfetch; and
+(3) a pipelined runtime with asynchronous prefetch threads
+and batched I/O to hide loading latency. Extensive experiments demonstrate that SP-MoE achieves a 1.07×–3.5×
+TPOT speedup over state-of-the-art methods across diverse
+datasets, environments, and MoE-based models.
+
+1
+
+C D E F
+C' D' E'
+
+⑥
+
+A B
+
+①
+
+C D E F
+
+⑤
+
+Target Model
+
+Draft Model
+
+②
+
+MoE Block
+Input Tokens
+Draft Tokens
+Verified Tokens
+
+E0 E1 ... En
+
+×L
+
+④
+B C'
+D D'
+X E'
+
+Verification Stage
+
+③
+
+C' D' E'
+
+Drafting Stage
+
+Figure 1. MoE-based LLM with speculative decoding
+the longest prefix consistent with its own predictions as verified tokens. The accepted tokens are then emitted as outputs
+and fed back into the draft model for the next drafting stage.
+By reducing the number of sequential steps required from
+the target model and exploiting parallelism in verification,
+SD achieves significant acceleration in LLM decoding.
+Meanwhile, the Mixture-of-Experts (MoE) architecture
+is another optimization technique that replaces dense feedforward layers with sparse expert networks, activating only
+a small portion of experts per token. This design significantly
+reduces computation while maintaining model quality. Combining MoE with SD techniques can further lower the time
+per output token (TPOT). For instance, Mixtral 8×7B, one of
+the most representative MoE models, achieves a 1.5-3.5×
+speedup with SD [22, 36]. However, MoE’s sparse structure substantially increases memory requirements. Mixtral
+8×7B [16] requires approximately 87 GB of memory for inference, far exceeding the 24 GB capacity of a consumer-grade
+GPU such as the NVIDIA RTX 4090.
+To mitigate excessive GPU memory demand, researchers
+have turned to parameter offloading [20], which becomes
+the mainstream solution for MoE inference on resourceconstrained platforms. By storing part of the expert parameters in CPU memory and selectively loading into GPU memory at runtime, offloading leverages MoE’s sparse activation
+pattern to fit large models onto smaller GPUs. Yet, it introduces substantial communication overhead, as experts can
+be repeatedly transferred between CPU memory and GPU
+memory. To reduce this I/O overhead, prior MoE offloading
+
+Introduction
+
+Large language models (LLMs) such as Llama [38], GPT-4 [2],
+and DeepSeek-V2 [24] have gained widespread popularity in
+recent years. However, their standard decoding process generates tokens one by one in an autoregressive manner [28],
+which is inherently sequential, limiting computational parallelism and leading to suboptimal GPU utilization. Inspired by
+speculative execution techniques [11, 31], researchers have
+recently developed speculative decoding (SD) mechanisms.
+As illustrated in Figure 1, SD decomposes autoregressive
+decoding into two stages. In the drafting stage, a typically
+smaller and faster model, termed a draft model, generates
+up to 𝑁 (usually 𝑁 > 1) tokens autoregressively, referred
+to as draft tokens. This is followed by a verification stage,
+during which the target model, the full LLM used in standard
+decoding [4, 12, 20, 34, 42], processes the 𝑁 draft tokens,
+appended after the latest output token, in parallel. accepting
+1
+
+Conference’17, July 2017, Washington, DC, USA
+
+Trovato et al.
+
+systems [6, 7, 15, 18, 43] have employed prefetching and
+pipeline execution to overlap computation with communication (I/O operation). Intuitively, prefetching experts before
+their layers are executed can reduce latency compared to
+purely on-demand expert loading (see Figure 5). Other works
+increase request batch size to accumulate the computation
+time [9], which can hide a portial of expert loading time.
+Unfortunately, existing MoE offloading systems are not natively compatible with SD and therefore cannot deliver best
+performance. The key limitation is that they inherently lack
+mechanisms to exploit the drafting stage, which is unique to
+SD-enabled LLM inference. More importantly, they do not
+address memory bandwidth contention problem in SD-enabled
+MoE inference. We identify that this contention stems from
+multi-token verification. As shown in Figure 2a, the percentage of activated experts grows with the number of draft
+tokens, requiring more experts to be loaded from CPU to
+GPU and creating severe memory bandwidth pressure. Besides, SD’s efficiency is tied to the acceptance rate of draft
+tokens. When the acceptance rate is low, loading experts for
+ultimately rejected tokens competes for I/O bandwidth with
+experts for accepted tokens, wasting I/O capacity and undermining inference efficiency. These issues call for a tailored,
+SD-aware offloading framework for MoE inference.
+Insights from observations. To further understand the
+memory contention problem and identify optimization opportunities, we make three key observations, elaborated in
+§2. First, entropy analysis of prediction strategies shows
+that it is feasible to predict critical expert for neighboring
+draft tokens, which tend to activate similar experts (Observation I). Second, over-prefetching experts, that is prefetching
+excessive experts for future layers without regard for I/O
+contention, as in MoE-Infinity shown in Figure 5, reduces
+prefetching accuracy, triggers more on-demand expert loading, and delays computation (Observation II). Third, each
+drafting stage consumes a non-trivial portion of decoding
+time, offering a opportunity to preload certain experts during
+drafting and reduce loading time in the subsequent verification stage (Observation III).
+Driven by the above insights, we propose SP-MoE, the first
+system that designs and realizes SD-customized prefetching,
+caching, and pipelined execution that overlaps computation
+and communication, to accelerate MoE model inference. The
+core innovation is a layer-to-layer prefetching strategy that
+runs in the drafting stage: attention outputs of one layer
+from the draft model are combined with the gating network
+of the target model to predict which experts will be activated
+in the corresponding target layer computed in the target
+stage. This offers extra I/O budget for prefetching experts
+while increasing prediction accuracy. A key challenge is that
+naively prefetching experts for all layers during drafting can
+result in cache thrashing, since predicting experts for deeper
+MoE layers too early consumes limited GPU memory and
+forces unwanted evictions. To address this, we augment our
+
+drafting stage prefetching with several system optimization
+techniques, elaborated in our contributions listed below.
+• We design a drafting-stage speculative prefetching framework that exploits SD’s unique two-stage structure for
+MoE inference acceleration. This design is guided by key
+empirical observations and reinforced by an analytical latency model that balances computation, bandwidth, and
+memory capacity. Specifically, by combining draft-model
+attention outputs with the layer-wise gating network of
+the target model, SP-MoE predicts critical experts required
+for multi-token verification. We also introduce a cutoff
+layer strategy, where prefetching is performed only for
+layers before the cutoff, selected based on hardware constraints and profiled system characteristics, to ensure justin-time availability without cache thrashing. (§3.2).
+• Prior offloading systems achieve only coarse-grained overlap between computation and I/O, leaving long stalls in
+SD-enabled inference. We design a pipelined runtime that
+treats expert prefetching as a continuous background service rather than a blocking step. An asynchronous worker
+thread executes prefetching on a dedicated CUDA stream,
+decoupling transfers from model computation, while a
+batched I/O mechanism eliminates per-expert synchronization. Together, these mechanisms create a fully pipelined
+process that hides I/O latency, reduces overhead, and sustains high bandwidth utilization (§3.3).
+• We implement SP-MoE by building upon PyTorch and
+Transformer-based code. Extensive experiments on our
+lab testbeds demonstrate that SP-MoE significantly reduces TPOT by 6.9%–71.4% compared with three baselines,
+in three models, four datasets, and three computation environments.
+
+2
+
+Background and Motivation
+
+Speculative decoding (SD) is a promising technique to
+accelerate generation. As illustrated in §1 and Figure 1, SD
+allows multiple tokens to be generated in a single iteration,
+thereby reducing the total number of iterations. Each iteration is divided into two stages: drafting, where a lightweight
+draft model proposes several candidate tokens, and verification, where the target model validates these candidates.
+Verified tokens are accepted, while at the end of each iteration an adjustment is made—either correcting the first
+rejected token or appending an additional token if all candidates are accepted [20]. The draft model must serve as
+an efficient approximation of the target model to maximize
+acceptance. In the worst case, only one token is accepted
+per iteration, but across iterations SD still offers significant
+potential for parallel token generation.
+2.1
+
+Expert Offloading in MoE Inference
+
+MoE-based LLMs inference consists of two phases: prefill
+and decode. The prefill phase processes all input tokens in
+2
+
+Mixtral-Max
+Phi-Max
+Deepseek-Max
+
+3
+
+Number of Draft Tokens
+
+4
+
+(a) Activation rate of three models and
+their theoretical maxima (-Max).
+
+Bigbench
+Wikitext_103
+100
+75
+50
+25
+0
+Mixtral Phi-MoE Deepseek
+
+(b) Percentage of token pairs with overlapping expert activation sets.
+
+Conference’17, July 2017, Washington, DC, USA
+
+Random
+Coarse-grained
+
+Mean Entropy
+
+100
+Mixtral
+Phi
+80
+Deepseek
+60
+40
+20
+0 1
+2
+
+Percentage (%)
+
+Activation Rate (%)
+
+SP-MoE : Speculative Decoding and Prefetching for Accelerating MoE-based Model Inference
+
+Gating-based
+
+4
+3
+2
+1
+
+Mixtral
+
+Phi-MoE Deepseek
+
+(c) Mean entropy per layer of three models for
+three kinds of strategies.
+
+Figure 2. Observation I: Neighboring draft tokens exhibit overlapping expert activations, motivating the notion of critical
+experts. Their strong predictability, especially under gating-based strategies, is key to reducing expert loading overhead.
+parallel, while the decode phase generates one token at a
+time, using the output from the previous iteration, following
+an autoregressive mechanism [39]. Each layer of an MoEbased LLM contains an attention layer, a gating network,
+and a feed-forward layer splited into multiple smaller FFNs
+termed experts. The gating network selects top-𝑘 experts for
+each token, to which the token is then routed for computation. Formally, the output of MoE block is a weighted sum
+of the selected experts’ output for any input 𝑥:
+
+𝑂𝑢𝑡𝑝𝑢𝑡 =
+
+𝑘
+∑︁
+
+𝐺 (𝑥)𝑖 · 𝐸𝑖 (𝑥),
+
+Although prior works have shown that integrating SD
+with MoE inference can reduce TPOT [22, 36], they do not
+address the bandwidth contention problem in multi-token
+verification. Existing MoE offloading mechanisms remain
+coarse-grained and overlook the unique drafting-verification
+structure. We take the first attempt to systematically exploit
+the characteristics of models, inference stages, and tokenlevel behavior in this setting, leading to several key observations that motivate the design of SpecMoE.
+2.2
+
+(1)
+
+Key Observations and Design Motivation
+
+To build an effective prefetching system that alleviates bandwidth contention, two components are essential: (i) an accurate predictor for speculative prefetching and (ii) a pipelined
+runtime for compute–communication overlap. We base our
+design on the following observations.
+Observation I: Promising expert preditability for neighboring draft tokens. As shown in Figure 2a, the number
+of activate experts does not increase linearly as the number
+of neighboring tokens grows, indicating that neighboring
+tokens may activate the same experts. Figure 2b also shows
+the high proportions of token pairs with overlapping expert
+activation sets across two datasets [13, 27] for three models [1, 16, 24]. Since the draft model maintains the properties
+of autoregressive decoding, the generated draft tokens exhibit sequential dependencies, resulting in similar expert
+activation patterns across neighboring tokens. How to leverage this token-wise similarity to increase expert prediction
+accuracy becomes the key. To evaluate prediction strategies
+for identifying critical experts, we analyze the entropy [30]
+of their predicted expert activation probabilities. Random
+strategy selects the same number of experts to prefetch as
+the number of critical experts, uniformly at random. Coarsegrained, which follows MoE-Infinity [43], prefetches the
+most frequently activated experts based on historical activations. Gating-based strategy uses the draft model’s attention
+outputs and the target model’s gating network, which is
+
+𝑖=1
+
+where 𝐺 (𝑥)𝑖 is denoted as the gating score of the 𝑖-th selected
+expert in current layer and 𝐸𝑖 (𝑥) is the output of the 𝑖-th
+selected expert. Due to its sparsity nature, during inference,
+each token only activates a subset of experts each layer,
+termed critical experts. For instance, Mixtral 8×7B [16]
+selects two out of eight experts, Phi-MoE [1] selects two out
+of sixteen experts, and Deepseek [24] consistently utilizes
+two shared experts and selects six out of 64 fine-grained
+experts per layer to participate in the above computation.
+As LLMs parameters scale, GPU memory becomes a bottleneck on resource-constrained platforms. To mitigate this,
+offloading has been adopted, which stores a portion of experts on CPU memory or SSD, leaving only critical ones
+in GPU memory based on prediction. Moreover, loading an
+expert via PCIe is significantly slower than their expert computation [37], as shown in Figure 4. For instance, loading
+a layer of Mixtral 8×7B via PCIe 4.0 (32 GB/s) takes about
+80 ms from CPU memory, while computing it on an RTX
+4090 takes only 3 ms [37]. To mitigate this imbalance and
+reduce expert transfer between CPU and GPU, recent approaches [6, 7, 9, 15, 43, 47] propose expert prefetching and
+caching algorithms, with some also incorporating schemes
+that overlap expert loading with computation across multiple
+modules and multiple tokens.
+3
+
+Eviction Rate(%)
+
+Conference’17, July 2017, Washington, DC, USA
+
+100
+
+Trovato et al.
+
+Prefetch Success
+Partial Prefetch Fail
+MoE-infinity Origin
+
+90
+
+0
+
+1
+
+2
+
+3
+
+4
+
+5
+
+6
+
+Prefetch Layer
+
+7
+
+8
+
+Expert Computation
+Other Overhead
+
+20
+
+60
+
+Deepseek
+Phi-MoE
+Mixtral
+
+80
+70
+
+Expert Loading
+Drafting
+
+0
+
+9
+
+40
+
+80
+
+Percentage (%)
+
+100
+
+Figure 4. Observation III: Latency distribution of a single
+decode iteration across three models.
+
+Figure 3. Observation II: Prefetching for lighter layers yields
+lower eviction rates.
+inspired by AdapMoE [7] which uses the gating and attention output of the same layer within the same model (target
+model) to predict expert activation in the next layer.
+Figure 2c shows that gating-based prediction yields lower
+entropy than coarse-grained prediction and aligns with the
+actual skewed activation entropy. Lower entropy reflects
+more skewed probability distributions and thus stronger
+predictability, since expert activations are inherently imbalanced, with only a small subset of experts being critical.
+Observation II: Excessive prefetching should be optimized to avoid. Previous coarse-grained prefetching approaches [43] typically employ a greedy strategy that generates excessive prefetching tasks per layer, incuring memory
+bandwidth contention and blocking the on-demand loading
+tasks. Besides, due to the insufficient memory budget on a
+GPU, the redundant prefetching tasks also leads to frequent
+evictions of potential experts from the GPU memory. To
+empirically validate this phenomenon, we vary the prefetching depth, i.e., the number of layers allowed for parameter prefetching, thereby indirectly modulates the prefetch
+queue pressure. Then, we observe the eviction rate caused
+by prefetching operations. As depicted in Figure 3, there is a
+clear correlation between prefetch depth and cache thrashing
+in GPU memory, where increasing the prefetch layers leads
+to progressively higher thrashing rates. Notably, we observe
+a non-linear performance degradation when the prefetch
+depth exceeds three layers, suggesting a critical threshold in
+cache utilization efficiency. More critically, when the prefetch
+depth exceeds five layers, prefetch failures occur due to the
+memory bandwidth contention, significantly compromising
+prefetching efficiency.
+This insight underscores the need for more specific prefetching strategies that prioritize quality over quantity. Rather
+than prefetching numerous experts speculatively to cover
+potential demand, we should focus on precisely identifying
+and prefetching only the most critical experts.
+Observation III: Drafting stage provides idle I/O budget for prefetching. The inference latency of SD-enabled,
+MoE-based LLM is primarily dominated by expert loading,
+which accounts for 69.4% on average as shown in Figure 4.
+This bottleneck issue arises from the conflict between massive expert loading (336 MB per expert in Mixtral 8×7B,
+150 MB per expert in Phi-MoE, and 16.5 MB per expert in
+
+Drafting
+Prediction
+
+Attention
+Expert
+
+Gate
+Prefetching
+On-Demand
+
+3
+
+Comp.
+IO
+
+0
+
+3
+
+5'
+
+0
+
+5'
+
+1''
+
+1
+1''
+time
+
+AdapMoE
+Comp.
+IO
+
+3
+
+3
+5'
+
+0
+
+5' 5 1''
+1''
+
+0
+
+time
+
+MoE-Infinty
+Comp.
+IO
+
+3
+
+3
+5'
+
+0
+0
+
+5'
+2''❌
+
+1''
+1''
+
+time
+
+SpecMoE
+Comp.
+IO
+
+3
+3
+
+5'
+
+1''
+
+0
+
+0
+...
+
+5'
+
+1''
+
+...
+time
+
+Figure 5. Pipeline of four representative mechanisms that
+offload expert parameters. The number of single quotation
+indicates the number of layer.
+
+Deepseek) and the limited CPU-GPU bandwidth (PCIe 4.0 at
+32 GB/s). Additionally, latency is also influenced by the drafting process (16.2% on average), leaving the I/O bandwidth
+underutilized. To overcome the above issue, it necessitates a
+thorough pipeline analysis to identify further optimization
+opportunities. As shown in Figure 5, when it comes to run an
+MoE-based LLM, the model often exceeds the memory capacity of the GPU, triggering an out-of-memory error since the
+entire model cannot fit within a GPU with limited memory.
+For the vanilla offloading approach, it adopts on-demand expert loading strategy but creates significant pipeline bubbles
+during expert computation. Furthermore, the gating-based
+prefetching, like AdapMoE [47], successfully loads expert
+parameters before expert computation to reduce bubbles in
+verification stage. However, it fails to utilize idle I/O bandwidth in the drafting stage for additional expert loading. In
+worst case, coarse-grained prefetching based on historical
+pattern, like MoE-Infinity [43], may prefetching a wrong
+expert and introduce additional overhead.
+The above analysis reveals an opportunity to overlap expert transfers with drafting-stage duration, termed draftingstage prefetching (SP-MoE). This technique improves I/O
+utilization by prefetching experts for the first few layers of
+target model when drafting, ultimately reducing pipeline
+bubbles and decreasing inference latency.
+4
+
+Iter. i+1
+B
+
+...
+
+E F
+
+Draft Model (DM)
+
+DM Input Hidden States
+DM
+
+Drafting
+
+Embedding
+
+Emb
+
+Transformer
+×L ×L
+
+TF 1×L×L
+
+LM Head
+
+Head
+
+Attention Layer
+MLP
+
+Predictor
+
+F G'H'I'
+
+Target Model (TM)
+
+TM
+
+Verification
+
+Embedding
+
+Emb
+
+Transformer×L ×L
+
+TF 1 ×L
+
+Gate
+
+Attention Layer
+MoE Block
+
+Decode
+
+Offloaded
+Experts
+
+E2
+
+En
+
+Input Tokens
+
+Verified Tokens
+
+...
+
+3.1
+
+Design Challenges and Overview of SP-MoE
+
+0
+
+15
+
+10 Layer
+15
+
+5
+
+Layer
+
+Deepseek
+
+20
+20
+
+25
+
+30
+
+25
+
+30
+
+1.0
+0.9
+0.8
+0.7
+0.6
+
+0
+
+5
+
+10
+
+15
+
+Layer
+
+20
+
+25
+
+30
+
+which scores each expert and identifies the critical ones for
+prefetching. The fundamental reason that our predictor can
+utilize attention outputs for expert activation prediction lies
+in the architecture similarity of draft and target models.
+
+Design challenges. Optimizing MoE-based LLM inference
+with speculative decoding (SD) presents three challenges: (1)
+Draft model selection: a lighter draft model reduces drafting time but shortens the prefetching window and risks
+imprecise tokens, lowering acceptance rates and reverting to
+autoregressive decoding; (2) Data-dependent expert coverage: gating-based prefetching can require nearly all experts
+when coverage is high, making full prefetching infeasible;
+and (3) System-level constraints: prefetching efficiency depends on balancing model properties with hardware limits
+(e.g., PCIe bandwidth, GPU compute), otherwise excessive
+expert loading undermines performance.
+Design overview. To address these challenges, we propose
+SP-MoE, a novel inference engine for MoE architectures with
+SD (Figure 6). It consists of three components: (1) a profiling module that analyzes expert sizes and hardware to set a
+cutoff layer, limiting prefetched experts while maximizing
+overlap with draft computation (§3.2); (2) a prediction module that uses a gating predictor to identify critical experts
+and push them into a shared prefetching queue (§3.2); and
+(3) a prefetching module that executes tasks from the queue
+based on the cutoff layer, overlapping prefetching with draft
+model computation to deliver the core functionality (§3.3).
+Key idea. SP-MoE exploits idle CPU–GPU I/O bandwidth
+during the drafting stage to prefetch and reorganize critical experts, improving GPU memory hit rates. Its efficiency
+hinges on two factors: the accuracy of critical-expert prediction and the overhead of prefetching. The next sections
+details how our design balances these factors.
+3.2
+
+10
+
+Phi-MoE
+
+Figure 7. Cosine similarity and prediction accuracy across
+layers between draft and target models.
+
+Figure 6. Overview of SP-MoE.
+
+System Design
+
+Mixtral 8x7B
+
+(b) Prediction accuracy.
+
+Output Logits
+
+3
+
+1.0
+0.8
+0.6
+5
+0.4
+
+Conference’17, July 2017, Washington, DC, USA
+
+(a) Cosine similarity.
+
+Draft Tokens
+
+Head
+GHIJ
+
+CPU
+
+TM Input Hidden States
+
+E1
+C D E F
+
+GPU
+
+Cached
+Expert
+
+E2
+
+Gate
+
+LM Head
+
+0
+
+Prefetcher
+Task queue
+
+B C' D' E'
+
+1.0
+0.9
+Model Config.
+0.8
+H/W Settings
+0.7
+System Profiler
+0.6
+(Cutoff Layer)
+
+Accuracy
+
+A
+
+Accuracy
+
+Iter. i
+...
+
+Similarity
+
+SP-MoE : Speculative Decoding and Prefetching for Accelerating MoE-based Model Inference
+
+Table 1. Draft and target model architectures. Para. = model
+parameter size; #E/L = number of experts per layer; FFN =
+expert feed-forward size; Hid. = hidden size; #L = number of
+transformer blocks; AC = acceptance rate with SD.
+Model
+Mistral 7B
+Mixtral 8x7B
+Phi-mini-MoE
+Phi-3.5-MoE
+Deepseek-Lite-AWQ
+Deepseek-Lite
+
+Para.
+7B
+45B
+8B
+42B
+3B
+15B
+
+#E/L FFN
+N/A 14336
+8
+14336
+16
+960
+16
+6400
+64
+1408
+64
+1408
+
+Hid.
+4096
+4096
+4096
+4096
+2048
+2048
+
+#L
+32
+32
+32
+32
+27
+27
+
+AC
+97.42%
+98.15%
+97.01%
+
+Draft-target model selection. To maintain SD’s efficiency,
+the architectural compatibility between the draft model and
+target model is critical. For instance, the optimal draft model
+corresponding to the target model Mixtral 8x7B [16] would
+be Mistral 7B [17], according to SpecExec [36]. For target
+models Phi-3.5-MoE [1] and Deepseek-Lite [24], we select
+Phi-mini-MoE and Deepseek-Lite-AWQ as the corresponding
+draft models. As shown in Table 1, when evaluated on the
+HumanEval [21] dataset, the three model pairs achieved
+the draft token acceptance rate (AC) of 97.42%, 98.15%, and
+97.01%, respectively. Such high ACs ensure that most drafted
+tokens are correct, leading to both high-quality final outputs
+and low inference latency.
+Cross-model predictor. The draft–target similarity motivates a predictor that leverages the attention output of each
+draft model layer to predict the expert activations of the
+corresponding target model layer during verification. Two
+factors support this design: (1) draft decoding requires a full
+forward pass through all layers, mirroring the target model’s
+
+Expert Predictor
+
+Driven by Observation I, we propose an expert predictor
+that feeds the attention output from each layer of the draft
+model into the corresponding gating network of target model,
+5
+
+Conference’17, July 2017, Washington, DC, USA
+
+Trovato et al.
+
+experts must not exceed capacity (𝑀𝐺𝑃𝑈 ); and (2) time overlap, i.e., expert loading must be fully hidden by computation,
+otherwise all prefetched tasks up to the cutoff must finish
+before drafting ends. Formally, we have:
+
+Algorithm 1: Expert Prediction and Prefetching Task
+Queue Management.
+Input : Prefetching task queue 𝑄𝑙𝑜𝑎𝑑 , attention
+output 𝑠, cutoff layer 𝐿, current layer 𝑙, gates
+network 𝐺𝑎𝑡𝑒𝑠, 𝑘, critical experts 𝐸𝑐𝑟𝑖𝑡𝑖𝑐𝑎𝑙 ,
+cached queue 𝑄𝑐𝑎𝑐ℎ𝑒 , 𝑐𝑢𝑑𝑎.𝐸𝑣𝑒𝑛𝑡,
+𝑐𝑢𝑑𝑎_𝑒𝑥𝑝𝑒𝑟𝑡_𝑠𝑡𝑟𝑒𝑎𝑚
+1 if MLP of the l-th layer drafting is triggered & l ≤ L
+then
+2
+𝑒𝑥𝑝𝑒𝑟𝑡_𝑠𝑐𝑜𝑟𝑒𝑠 ← 𝐺𝑎𝑡𝑒𝑠 [𝑙] (𝑠) ;
+3
+𝐸𝑐𝑟𝑖𝑡𝑖𝑐𝑎𝑙 ← 𝑇𝑜𝑝𝐾_𝐼𝑛𝑑𝑒𝑥 (𝑒𝑥𝑝𝑒𝑟𝑡_𝑠𝑐𝑜𝑟𝑒𝑠, 𝑘);
+4
+for 𝑒𝑥𝑝𝑒𝑟𝑡 ∈ 𝐸𝑐𝑟𝑖𝑡𝑖𝑐𝑎𝑙 do
+5
+if 𝑒𝑥𝑝𝑒𝑟𝑡 ∈ 𝑄𝑐𝑎𝑐ℎ𝑒 then
+6
+𝐸𝑐𝑟𝑖𝑡𝑖𝑐𝑎𝑙 .𝑟𝑒𝑚𝑜𝑣𝑒 (𝑒𝑥𝑝𝑒𝑟𝑡) ;
+7
+8
+
+𝑁𝑒𝑥𝑝𝑒𝑟𝑡 =
+
+𝐿
+∑︁
+
+𝑘𝑖 ,
+
+𝑀𝑝𝑒𝑎𝑘 + 𝑁𝑒𝑥𝑝𝑒𝑟𝑡 · 𝑀𝑒𝑥𝑝𝑒𝑟𝑡 < 𝑀𝐺𝑃𝑈 ,
+
+𝑖=0
+
+max{(𝐿 − 1)𝑡𝑐𝑜𝑚𝑝 + 𝑘𝐿 · 𝑡𝐼 /𝑂 , 𝑁𝑒𝑥𝑝𝑒𝑟𝑡 · 𝑡𝐼 /𝑂 } ≤ 𝐿𝑎𝑙𝑙 · 𝑡𝑐𝑜𝑚𝑝 ,
+where 𝑘𝑖 is the number of prefetched experts in layer 𝑖,
+𝑀𝑒𝑥𝑝𝑒𝑟𝑡 is the expert size, 𝑀𝑝𝑒𝑎𝑘 is the peak capacity, 𝑀𝐺𝑃𝑈
+denotes the GPU memory volume, 𝐿𝑎𝑙𝑙 denotes the total number of transformer blocks in draft model, and 𝑡𝑐𝑜𝑚𝑝 and 𝑡𝐼 /𝑂
+denote the per-layer computation and per-expert loading
+times, respectively. The last inequality enforces that the chosen cutoff layer allows all expert prefetching to complete
+during drafting, no matter whether compute time or I/O time
+is the bottleneck. To stabilize caching, we reserve a fixed
+number of experts per layer, denoted by 𝑘 in Algorithm 1.
+We have 𝑘𝑖 ≤ 𝑘, as cached experts are not prefetched.
+Given this formulation, our goal is to solve for 𝐿 that satisfies these requirements while minimizing the objection
+function. Because 𝑘𝑖 is difficult to predict precisely, we approximate it with 𝑘 and maximize 𝐿 under the constraints
+using profiled 𝑡𝑐𝑜𝑚𝑝 and 𝑡𝐼 /𝑂 , along with pre-known parameters 𝑀𝑒𝑥𝑝𝑒𝑟𝑡 and 𝑀𝐺𝑃𝑈 . In practice, we pick the top (𝑘 = 1)
+expert as critical experts for Mixtral 8×7B, the top two (𝑘 = 2)
+for Phi-3.5-MoE, and the top six (𝑘 = 6) for Deepseek-Lite
+(line 3) based on the following experience. Those values of
+𝑘 align with the number of experts activated per token per
+layer. Notably, the critical expert count of Mixtral 8×7B does
+not match its single-token activated expert count. This is because we get high accuracy in critical expert predictions with
+𝑘 = 1, and the size of one expert in Mixtral 8×7B (336 MB)
+is far larger than that in other models (150 MB in Phi-MoE
+and 16 MB in Deepseek), resulting in significantly higher
+costs when prefetching errors. If 𝐿 ≤ 𝑥, we set 𝐿 = ⌊𝑥⌋,
+ensuring all experts up to 𝐿 are prefetched during drafting
+to reduce verification latency. Because multiple draft tokens
+are processed in parallel and often activate overlapping experts, prefetched experts are frequently reused, pushing the
+system toward optimal performance. In the rare worst case,
+when none of the prefetched experts are used, I/O, memory,
+and eviction are wasted and performance falls to on-demand
+levels. Overall, the approach reliably reduces end-to-end
+inference latency.
+Interpretation of Algorithm 1. Integrating the computed
+cutoff layer 𝐿 with our cross-model predictor design, SP-MoE
+employs speculative expert prefetching. During drafting, for
+each layer 𝑙 ∈ {0, · · · , 𝐿}, SP-MoE first generates prediction scores for all the experts using the attention outputs
+𝑠 computed in the current layer (line 2). It then selects the
+top-k critical experts based on the gating scores. For those
+predicted critical experts that are cached in 𝑄𝑐𝑎𝑐ℎ𝑒 within
+
+𝑐𝑢𝑑𝑎.𝐸𝑣𝑒𝑛𝑡 .𝑟𝑒𝑐𝑜𝑟𝑑 (𝑐𝑢𝑑𝑎_𝑒𝑥𝑝𝑒𝑟𝑡_𝑠𝑡𝑟𝑒𝑎𝑚) ;
+𝑄𝑙𝑜𝑎𝑑 .𝑝𝑢𝑠ℎ_𝑏𝑎𝑐𝑘 (𝐸𝑐𝑟𝑖𝑡𝑖𝑐𝑎𝑙 , 𝑐𝑢𝑑𝑎.𝐸𝑣𝑒𝑛𝑡) ;
+
+inference but occurring earlier; and (2) as shown in Table 1,
+the two models share similar architectures (experts per layer,
+hidden size, and number of layers), making a cross-model,
+layer-to-layer mapping feasible. As shown in Figure 6, in
+each layer 𝑙 ∈ [𝐿] during drafting, the attention output is fed
+into our predictor, which directly reuses the gating network
+of the 𝑙-th target layer. Since this gating network is well
+trained, it can be effectively applied in the drafting stage,
+achieving high accuracy in identifying critical experts while
+preserving the draft model’s computational flow.
+To validate this design, we compare the cosine similarity of attention outputs between draft and target models.
+Figure 7a shows consistently high similarity across layers
+on WikiText-103 [27]: up to 94.59% for DeepSeek-Lite, and
+59.82% and 56.59% for Mixtral 8×7B and Phi-3.5-MoE, respectively, indicating sufficiently accurate prediction using the
+dual-model-based predictor. Figure 7b confirms this, with
+DeepSeek-Lite achieving 88.94% top-1 expert prediction accuracy on average across layers, and Mixtral and Phi-3.5-MoE
+maintaining approximately 88% accuracy.
+Cutoff layer design. Prediction and prefetching incur overhead at each layer during drafting, so we have an intuition
+that these operations must not delay the completion of either
+the drafting stage or the target model verification procedure.
+To achieve this, we propose a cutoff layer, denoted as 𝐿, for
+prefetching, i.e., we only prefetch experts 0 − 𝐿 layers based
+on prediction in the drafting stage. This cutoff layer limits
+the number of prefetched experts, which directly impacts
+the I/O time. We then formulate our objective as minimizing
+total latency 𝑇 = 𝑇𝑑𝑟𝑎𝑓 𝑡𝑖𝑛𝑔 + 𝑇𝑐𝑜𝑚𝑝 + 𝑇𝐼 /𝑂 , where 𝑇𝑑𝑟𝑎𝑓 𝑡𝑖𝑛𝑔
+denotes the time to generate draft tokens, 𝑇𝑐𝑜𝑚𝑝 is the verification computation time, and 𝑇𝐼 /𝑂 is the expert loading time.
+Moreover, two constraints guide the cutoff: (1) GPU memory, i.e., peak non-expert memory (𝑀𝑝𝑒𝑎𝑘 ) plus prefetched
+6
+
+SP-MoE : Speculative Decoding and Prefetching for Accelerating MoE-based Model Inference
+Drafting comp.
+Comp.
+IO
+
+Comp.
+IO
+
+layer 0
+E[0,1]
+
+layer 0
+E[0,1]
+
+layer 1
+E[0,5]
+
+E[1,3]
+
+layer 1
+E[0,5]
+
+E[1,3]
+
+Prefetching
+
+layer 2
+E[1,4]
+
+Algorithm 2: Prefetching Execution Algorithm.
+Input : Prefetching task queue 𝑄𝑙𝑜𝑎𝑑 , cache queue
+𝑄𝑐𝑎𝑐ℎ𝑒 , experts to load 𝐸𝑙𝑜𝑎𝑑 , experts to evict
+𝐸𝑒𝑣𝑖𝑐𝑡
+1 while LLM inference is not completed do
+2
+if 𝑄𝑙𝑜𝑎𝑑 𝑖𝑠 𝑛𝑜𝑡 𝑒𝑚𝑝𝑡𝑦 then
+3
+//Step 1: fetch the critical expert loading tasks
+from the queue.
+4
+𝐸𝑙𝑜𝑎𝑑 , 𝑐𝑢𝑑𝑎.𝐸𝑣𝑒𝑛𝑡 ← 𝑄𝑙𝑜𝑎𝑑 .𝑝𝑜𝑝 () ;
+5
+𝑐𝑢𝑑𝑎.𝐸𝑣𝑒𝑛𝑡 .𝑤𝑎𝑖𝑡 () ;
+6
+𝑁 ← 𝑙𝑒𝑛(𝐸𝑙𝑜𝑎𝑑 );
+7
+//Step 2: select an equal number of evicted
+experts to replace the prefetched experts.
+8
+for 𝑖 = 1 to 𝑙𝑒𝑛(𝑄𝑐𝑎𝑐ℎ𝑒 ) do
+9
+𝐸𝑒𝑣𝑖𝑐𝑡 .𝑎𝑝𝑝𝑒𝑛𝑑 (𝑄𝑐𝑎𝑐ℎ𝑒 [𝑖]);
+10
+if 𝑙𝑒𝑛(𝐸𝑒𝑣𝑖𝑐𝑡 ) == 𝑁 then
+11
+break;
+
+Vanilla
+Prefetch
+time
+
+layer 2
+E[1,4]
+Prefetching Task
+
+Worker
+Prefetch
+time
+
+Predictor
+Prefetching Task Queue
+
+E[0,1]
+
+Figure 8. Workflow of vanilla-prefetch executor and workerprefetch executor during the drafting stage.
+GPU memory, we skip prefetching it (lines 4–6). Otherwise,
+the rest of the critical experts are then pushed in a prefetching task queue 𝑄𝑙𝑜𝑎𝑑 under a CUDA stream. Each enqueue
+operation records a synchronization checkpoint 𝑐𝑢𝑑𝑎.𝐸𝑣𝑒𝑛𝑡,
+which coordinates interaction between the predictor and
+executor modules (lines 7, 8), as elaborated in §3.3.
+
+12
+
+3.3
+
+Conference’17, July 2017, Washington, DC, USA
+
+Expert Prefetcher
+
+13
+14
+
+While prior work [47] developed accurate prediction modules, it fails to maximize the overlap between expert loading
+and computation in its prefetching design. AdapMoE [47],
+for instance, temporarily stores prefetch information for one
+expert of the next layer after each prediction step, but delays the actual prefetch until just before the next layer’s
+experts are required. Since all experts for the current layer
+are retained in GPU memory, this strategy avoids evicting
+the prefetched expert. However, prefetching only a single
+expert offers limited benefit, and prefetching multiple experts per layer triggers I/O synchronization that blocks the
+subsequent layer’s computation, as shown in Figure 8.
+Continuous expert prefetching via worker thread. If a
+prefetching mechanism overlaps expert loading only with
+the computation of the current layer (e.g., [47]), if may suffer from stalls: when the computation time of any layer 𝑙 is
+insufficient to hide its expert loading time, CUDA memory
+copy must synchronize and wait for 𝑙’s expert prefetching before proceeding to the next layer, causing unnecessary overhead (Figure 8). To avoid this, we introduce a worker thread,
+termed Prefetcher, which decouples computation and I/O of
+the same layer so that they can execute asynchronously, as
+detailed in Algorithm 2. This design enables continuous expert prefetching across the drafting stage, allowing its total
+computation time to fully cover expert loading.
+Queue synchronization for reliable expert prefetching.
+The prefetching and prediction modules jointly maintain a
+prefetching task queue 𝑄𝑙𝑜𝑎𝑑 , where each task is associated
+with a fine-grained synchronization checkpoint 𝑐𝑢𝑑𝑎.𝐸𝑣𝑒𝑛𝑡.
+An expert loading task is executed by the worker thread only
+after its information is fully prepared in the queue, avoiding
+prefetching errors and data loss from incomplete task information. For example, once expert 1 of 0-th layer is selected
+
+15
+
+//Step 3: batch-replace the prefetched experts.
+𝑐𝑜𝑝𝑦_𝑛𝑜𝑛_𝑏𝑙𝑜𝑐𝑘𝑖𝑛𝑔(𝐸𝑙𝑜𝑎𝑑 , 𝐸𝑒𝑣𝑖𝑐𝑡 );
+for 𝑖 = 1 to 𝑁 do
+𝑄𝑐𝑎𝑐ℎ𝑒 .𝑚𝑜𝑣𝑒_𝑡𝑜_𝑒𝑛𝑑 (𝐸𝑙𝑜𝑎𝑑 [𝑖]) ;
+
+by the prediction module, as shown in Figure 8, its prefetching information is pushed into 𝑄𝑙𝑜𝑎𝑑 , and a synchronization
+checkpoint is recorded to confirm successful enqueueing
+(line 7 of Algorithm 1). The worker thread (Prefetcher) continuously processes prefetching tasks until the entire inference completes (line 1 of Algorithm 2). Each time, it retrieves
+expert loading information from the prefetching task queue
+𝑄𝑙𝑜𝑎𝑑 and checks synchronization checkpoints 𝑐𝑢𝑑𝑎.𝐸𝑣𝑒𝑛𝑡
+for each prefetching task to ensure data integrity (lines 4, 5
+of Algorithm 2).
+Batched I/O operations for expert loading. To further reduce overhead, for the experts to be prefetched in each layer,
+we batch their I/O operations to run consecutively within the
+same time period (line 13 of Algorithm 2). This minimizes frequent switching between I/O and computation, reducing the
+kernel overhead of launching the I/O tasks. Meanwhile, an
+equal number of GPU-cached experts must be batch-selected
+to replace the prefetched ones, where the cache queue 𝑄𝑐𝑎𝑐ℎ𝑒
+follows an LRU caching strategy as detailed in §4.4 (lines
+8–11, 15 of Algorithm 2).
+
+4
+
+Implementation
+
+We implement a prototype of SP-MoE using PyTorch and
+Transformer-based components from the Hugging Face library [41].
+7
+
+Conference’17, July 2017, Washington, DC, USA
+
+4.1
+
+Trovato et al.
+
+Table 2. Hardware environments for evaluation.
+
+Prediction Module Integration
+
+In the speculative decoding, the draft model rapidly generates 𝑁 draft tokens per iteration during the drafting stage.
+Subsequently, the target model parallelly verifies all draft
+tokens and employs a greedy accept-reject strategy to retain
+accepted draft tokens. While preserving the original computational flow of the draft model, we implement the predictor
+module by adding hook functions to each layer. These hooks
+capture attention outputs during execution, which are then
+fed as inputs to the target model’s gating network. This allows us to calculate expert scores and identify critical experts
+for prefetching.
+4.2
+
+Environment
+
+SD Implementation and Configuration
+
+Computation Implementation
+
+To demonstrate the effectiveness of prefetching, SP-MoE
+modifies the conventional expert computation order in Transformers [41], prioritizing the GPU-cached experts for computation. Taking Mixtral 8×7B as an example, traditional
+implementation [41] processes tokens sequentially from Expert 0 to Expert 7. However, to reduce GPU memory switching overhead, SP-MoE adopts the existing approaches like
+ProMoE [32] and Klotski [9], employing the reordered computation: experts already cached in GPU memory are prioritized for immediate token processing, while the remaining
+experts cached in CPU memory are loaded on demand into
+GPU memory for subsequent computations.
+4.4
+
+Cache Implementation
+
+SP-MoE employs the LRU caching strategy to optimize expert eviction in MoE layers. We leverage a cache queue 𝑄𝑐𝑎𝑐ℎ𝑒
+to track the expert access order. For new experts not in the
+queue, we evict the head-of-queue expert, replace it with the
+new one, and push it to the tail. For existing experts in the
+queue, we first remove them and then reinsert them from the
+back. Based on the LRU caching strategy, this mechanism
+prevents recently prefetched experts from being evicted.
+
+5
+
+CPU
+Memory
+
+Env. 1
+
+NVIDIA RTX 3090
+
+Env. 2
+
+NVIDIA RTX 4090
+
+Env. 3
+
+NVIDIA A100
+
+PCIe
+
+Model
+
+Memory
+
+Model
+
+24 GB
+
+Intel Xeon Gold 6348
+
+512 GB
+
+4.0 x 16
+
+24 GB
+
+Intel Xeon Gold 6338N
+
+1T
+
+4.0 x 16
+
+40 GB
+
+Intel Xeon Platinum 8358P
+
+1T
+
+4.0 x 16
+
+Models. We evaluate SP-MoE using three draft–target model
+pairs. First, we adopt Mixtral 8×7B [16], a widely used MoEbased LLM, as the target model and Mistral [17, 36] as its
+draft model. Mixtral 8×7B consists of 32 transformer blocks,
+each with an MoE layer containing 8 experts. Second, we pair
+Phi-3.5-MoE [1] with Phi-mini-MoE as its draft model. Third,
+we pair Deepseek-Lite [24] with Deepseek-Lite-AWQ. These
+three pairs demonstrate that SP-MoE effectively reduces expert loading latency and expands prefetching opportunities
+during the drafting stage.
+Datasets and metrics. We use four established LLM benchmarks: HumanEval [21], BigBench [13], WikiText-103 [27],
+and MMLU-Pro [40]. HumanEval is a 164-problem code generation benchmark; BigBench includes 204 diverse tasks measuring broad reasoning ability; WikiText-103 contains 103M
+Wikipedia tokens for long-context modeling; and MMLUPro tests domain expertise across 57 subjects. Together, they
+cover code generation, reasoning, language modeling, and
+specialized knowledge. All experiments use a fixed output
+length of 100 tokens, with the draft model generating one
+draft token per iteration (the actual number is determined
+by the SD algorithm [20]). We focus on decoding-phase performance and report TPOT as the main metric. All reported
+results are averaged over multiple runs to ensure statistical
+reliability.
+Baselines. We compare SP-MoE against three baselines,
+where we we integrate state-of-the-art MoE offloading methods with SD mechanisms:
+• Mixtral-Offloading+SD [7] adopts offloading with an
+LRU cache to enable Mixtral 8×7B inference on resourceconstrained platforms.
+• MoE-Infinity+SD [43] performs request-level prefetching
+based on historical sequence-level expert activation patterns.
+• AdapMoE+SD [47] employs adaptive gating prediction to
+prefetch experts for subsequent layers, reducing on-demand
+loading latency.
+
+SD is particularly well-suited for low-batchsize inference
+scenarios, especially when optimizing end-to-end latency
+for individual user requests. Existing approaches such as
+Medusa [3] and SpecExec [36] consistently set the batch
+size to 1, to maximize the optimization of the inference latency. Eagle [22], a state-of-the-art speculative decoding
+framework, demonstrates the most significant acceleration
+at batch size = 1 in its batch-scaling experiment. In line with
+these findings, SP-MoE also adopts batch size = 1 to demonstrate its maximal optimization of inference efficiency for
+SD-enabled and MoE-based LLMs.
+4.3
+
+GPU
+Model
+
+5.1
+
+End-to-End Performance Evaluation
+
+We evaluate the performance of SP-MoE against three advanced baselines to validate its effectiveness and scalability,
+varying dataset types, model variations, and environments.
+Evaluation across datasets. We first compare SP-MoE with
+baselines on four datasets, shown in Figure 9, convering diverse NLP evaluation scenarios. On average, SP-MoE reduces
+TPOT by 34% compared to Mixtral-Offloading (29-43% range),
+with a peak 1.75× speedup on HumanEval on 3090 GPU. It
+
+Evaluation
+
+Hardware. Our experiments are performed in three different
+environments, with configuration shown in Table 2.
+8
+
+SP-MoE : Speculative Decoding and Prefetching for Accelerating MoE-based Model Inference
+
+AdapMoE
+
+MoE Infinity
+
+1.5
+
+1.5
+
+1.5
+
+1.0
+
+1.0
+HumanEval Bigbench Wikitext-103 MMLU-Pro
+
+SpecMoE
+
+TPOT (s/token)
+
+TPOT (s/token)
+
+TPOT (s/token)
+
+Mixtral Offloading
+
+Conference’17, July 2017, Washington, DC, USA
+
+1.0
+
+HumanEval Bigbench Wikitext-103 MMLU-Pro
+
+HumanEval Bigbench Wikitext-103 MMLU-Pro
+
+Dataset
+
+Dataset
+
+(a) Mixtral 8×7B in Env. 1
+
+Dataset
+
+(b) Mixtral 8×7B in Env. 2
+
+(c) Mixtral 8×7B in Env. 3
+
+Figure 9. TPOT comparison across four datasets: SP-MoE achieves 1.35× average speedup over baselines (peak 1.75× vs.
+Mixtral-Offloading on HumanEval in Env. 1 and minimum 1.12× vs. AdapMoE on Wikitext-103 in Env. 2).
+
+1.0
+
+TPOT (s/token)
+
+TPOT (s/token)
+
+1.5
+
+AdapMoE
+
+MoE Infinity
+
+1.0
+
+0.5
+
+1.0
+
+0.5
+
+Mixtral 8X7B
+
+Phi-3.5-MoE
+
+Model Type
+
+Deepseek-Lite
+
+(a) HumanEval in Env. 1
+
+SpecMoE
+
+1.5
+
+TPOT (s/token)
+
+Mixtral Offloading
+
+1.5
+
+0.5
+
+Mixtral 8X7B
+
+Phi-3.5-MoE
+
+Model Type
+
+Deepseek-Lite
+
+(b) HumanEval in Env. 2
+
+Mixtral 8X7B
+
+Phi-3.5-MoE
+
+Model Type
+
+Deepseek-Lite
+
+(c) HumanEval in Env. 3
+
+Figure 10. TPOT comparison across three large language model types: SP-MoE achieves an average 2.3× speedup over
+baselines with peak 3.5× speedup over Mixtral-Offloading with Deepseek-V2-Lite on Env. 3 and minimum 1.1× speedup over
+AdapMoE with Phi-3.5-MoE on Env. 1.
+achieves a 19% reduction over MoE-Infinity (14-25% range),
+with a maximum 1.28× speedup on Bigbench in Environment
+2, and a 12% reduction compared to AdapMoE (8-17% range),
+with a maximum 1.19× speedup on Wikitext-103 on 3090
+GPU. Notably, speedup gains are most pronounced on the
+3090 GPU (average 1.41×), compared to 1.32× on the 4090
+and 1.21× on the A100, highlighting SP-MoE ’s efficiency in
+resource-constrained settings. Dataset-specific trends show
+that smaller code generation tasks like HumanEval benefit
+more, with an average 1.43× speedup (across all environments and baselines) versus 1.41× on WikiText-103. Even
+on the A100, SP-MoE maintains an average 1.21× speedup
+over AdapMoE, confirming robustness to hardware scaling
+and consistent improvements in expert prefetching during
+drafting.
+Evaluation across model types. We next compare the
+performance of SP-MoE over baselines across three model
+types, with results shown in Figure 10. Single-expert loading times vary substantially: Mixtral 8×7B requires approximately 14 ms, Phi-3.5-MoE needs 6 ms. and Deepseek-Lite
+achieves the fastest loading time at about 0.6 ms per expert.
+For Mixtral 8×7B model, SP-MoE achieves a 42.8% TPOT reduction versus Mixtral-Offloading on 3090 GPU, 19.8% over
+MoE-Infinity, and 13.2% against AdapMoE. The acceleration
+remains consistent on 4090 GPU with SP-MoE delivering
+45.2%, 29.9%, and 14.6% reductions against the same baselines respectively, and on A100 GPU, where it achieves 43.6%,
+29.4%, and 9.5% improvements respectively. For the Phi-MoE
+
+model, we select the strongest baseline AdapMoE for performance comparison. SP-MoE achieves a 31.6% TPOT reduction compared to AdapMoE on 3090 GPU. This performance
+advantage decreases to 15.2% over AdapMoE on 4090 GPU
+and maintains a 9.3% lead against AdapMoE on A100 GPU.
+The Deepseek model shows similar trends, with SP-MoE delivering 6.9%, 8.8%, and 12.6% improvements over best results
+of AdapMoE across 3090, 4090, and A100 platforms respectively. These results demonstrate that SP-MoE consistently
+outperforms baselines across models and hardware, with
+the largest gains on the resource-constrained 3090 GPU and
+still meaningful improvements on the A100, confirming its
+scalability and adaptability.
+5.2
+
+Hit Rate Evaluation
+
+To validate the effectiveness of SP-MoE, we analyze end-toend latency through expert hit rate, where a hit is counted
+when activated experts is cached in GPU. Across three model
+pairs and datasets, we compared hit rates of four frameworks.
+Among them, the Deepseek model pair showed the best
+performance, with consistent hit rate trends across all four
+datasets as shown in Table 3.
+Notably, Mixtral-Offloading originally supported only a
+quantized Mixtral 8×7B model [5]. For fair comparison, we
+extend its source code by adjusting weight configurations
+and optimizing its offloading logic to support Mixtral 8×7B [16],
+Phi-3.5-MoE [1], and DeepSeek-Lite [24]. We also extend
+AdapMoE and MoE-Infinity, which had limited model compatibility, to support the same three models.
+9
+
+Conference’17, July 2017, Washington, DC, USA
+
+Trovato et al.
+
+Table 3. Hit rate performance across datasets, models, and frameworks. MO indicates Mixtral-Offloading and MI indicates
+MoE-Infinity.
+Mixtral 8×7B
+
+Dataset
+
+Phi-MoE
+
+Deepseek
+
+MO
+
+MI
+
+AdapMoE
+
+SP-MoE
+
+MO
+
+MI
+
+AdapMoE
+
+SP-MoE
+
+MO
+
+MI
+
+HumanEval
+
+15.08%
+
+16.01%
+
+41.83%
+
+18.93%
+
+35.37%
+
+15.28%
+
+56.22%
+
+44.31%
+
+14.60%
+
+16.57%
+
+18.74%
+
+36.85%
+
+Bigbench
+
+15.14%
+
+15.83%
+
+42.82%
+
+21.39%
+
+22.36%
+
+14.71%
+
+45.14%
+
+41.38%
+
+17.50%
+
+16.34%
+
+21.80%
+
+41.25%
+
+Wikitext_103
+
+15.14%
+
+15.76%
+
+42.55%
+
+21.19%
+
+28.37%
+
+14.62%
+
+50.39%
+
+43.22%
+
+21.53%
+
+17.27%
+
+25.15%
+
+42.20%
+
+MMLU_Pro
+
+14.73%
+
+15.87%
+
+41.35%
+
+21.06%
+
+24.30%
+
+14.07%
+
+45.97%
+
+41.97%
+
+17.04%
+
+16.74%
+
+21.72%
+
+39.92%
+
+Average
+
+15.02%
+
+15.87%
+
+42.14%
+
+20.89%
+
+27.60%
+
+14.67%
+
+49.43%
+
+42.72%
+
+17.67%
+
+16.73%
+
+21.85%
+
+40.06%
+
+0.4
+0.3
+0.2
+0.1
+
+10.0
+
+MoE Infinity
+AdapMoE
+SpecMoE
+1.4
+1.2
+1.0
+0.8
+0.6
+4 8 25.0
+16 30.0 35.0
+15.0 2 20.0
+
+1.6
+
+TPOT (s/token)
+
+TPOT (s/token)
+
+Mixtral Offloading
+
+GPU Memory (GB)
+
+s+vp
+
+s+wp
+
+0.5
+
+1.4
+1.2
+
+0.4
+
+1.0
+
+0.3
+
+0.8
+
+0.2
+
+0.6
+
+Mixtral 8X7B
+
+Figure 11. TPOT comparison varying GPU memory for the
+DeepSeek draft-target model pair on dataset HumanEval in
+Env. 3.
+
+0.1
+
+s+wp+b
+0.3
+0.2
+0.1
+
+Phi-MoE
+
+0.0
+
+Deepseek
+
+Figure 12. Ablation on three models. Baseline (s) represents the vanilla offloading scheme integrated with SD,
+with vanilla prefetch during the drafting stage (vp), worker
+prefetch during drafting (wp) and batched I/O operations (b)
+applied.
+
+The Deepseek model under SpecMoE achieves an average
+hit rate of 40.06% (36.85–42.20%), outperforming all other
+frameworks. AdapMoE ranks second with an average of
+21.85% and a peak of 25.15% on WikiText-103, followed by
+Mixtral-Offloading (17.67%) and MoE-Infinity (16.73%). As
+noted earlier, SpecMoE’s prediction module attains high accuracy on the Deepseek model. With six experts cached per
+layer, SpecMoE accurately prefetches critical experts during
+drafting without additional overhead, yielding high hit rates.
+Although Deepseek experts are smaller, which limits the
+relative end-to-end acceleration compared to Mixtral and
+Phi-MoE, the hit rate benefits are clear. Interestingly, AdapMoE achieves higher hit rates than Mixtral-Offloading and
+MoE-Infinity on Mixtral and Phi-MoE, but its end-to-end performance lags behind SpecMoE due to significant prefetching
+overhead from its vanilla prefetching mechanism.
+5.3
+
+s
+
+AdapMoE SP-MoE
+
+the best results, reducing TPOT from 0.18 s to 0.10 s, and consistently delivering the lowest latency under tight memory
+constraints.
+SP-MoE’s advantages come from three factors. First,
+SP-MoE predicts activated experts with high accuracy (especially in DeepSeek models), dynamically caching critical
+experts to maximize hit rates, thus minimizing on-demand
+expert loading time. Second, its performance scales linearly
+with GPU memory as more memory directly reduces latency
+without loading experts frequently, unlike MoE-Infinity or
+AdapMoE. Third, distinct from AdapMoE, SP-MoE avoids
+synchronization overhead by leveraging efficient predictionbased prefetching. Together, these make SpecMoE particularly well-suited to resource-constrained environments.
+
+Memory Usage Comparison
+
+5.4
+
+In this section, we evaluate the performance of SP-MoE
+and other baselines varying GPU memory budgets. As GPU
+memory increases from 7 GB to 39 GB shown in Figure 11,
+Mixtral-Offloading steadily reduces TPOT from 0.27 s to
+0.10 s. MoE-Infinity improves slightly, lowering latency from
+0.39 s to 0.28 s at 24 GB, but stabilizes around 0.23 s for higher
+memory. AdapMoE maintains stable latency, ranging from
+0.19 s to 0.20 s across all memory levels, with minimal gains
+from additional resources. In contrast, SP-MoE achieves the
+
+Ablation Study
+
+As shown in Figure 12, the ablation experiments evaluate the
+incremental impact of optimization techniques on latency
+(TPOT) for three models. The baseline, SD-enabled offloading
+scenario with draft token length = 1, achieves a TPOT of
+1.40 s (Mixtral), 0.48 s (Phi-MoE), and 0.32 s (Deepseek). In
+the following ablation studies, both vanilla prefetch (layertriggered with I/O synchronization as illustrated in §3.3) and
+worker prefetch (continuous execution) demonstrated the
+effectiveness of drafting-stage prefetching.
+10
+
+SP-MoE : Speculative Decoding and Prefetching for Accelerating MoE-based Model Inference
+
+MoE-Infinity
+
+Env. 1
+
+Env. 2
+
+AdapMoE
+
+1.25
+
+1.25
+
+1.25
+
+1.00
+
+1.00
+
+1.00
+
+0.75
+
+0.75
+
+0.75
+
+2
+
+4
+
+8
+
+16
+
+2
+
+4
+
+8
+
+16
+
+Draft Token Length
+
+2
+
+SpecMoE
+
+Bigbench
+
+Env. 3
+
+4
+
+8
+
+TPOT (s/token)
+
+TPOT (s/token)
+
+Mixtral-Offloading
+
+16
+
+Figure 13. TPOT comparison varying draft token length per
+drafting stage: SpecMoE consistently achieves the lowest
+TPOT across three environments, though performance gaps
+narrow slightly with longer draft token length.
+
+0.95
+
+Mixtral
+
+Wikitext-103
+
+HumanEval
+
+0.40
+
+0.90
+
+0.17
+
+0.30
+
+10 15 20 25 30
+
+0.19
+
+MMLU-pro
+
+Deepseek
+
+0.18
+
+0.35
+
+0.85
+0.80
+
+Phi-MoE
+
+1 4 7 10 13
+
+Cutoff Layer
+
+0.16
+
+1 6 11 16 21
+
+Figure 14. TPOT comparison varying the value of cutoff layer: a U-shaped cutoff layer-TPOT relationship for
+Mixtral/Phi-MoE, but linear latency reduction for DeepSeek
+with increasing cutoff layers.
+
+Notably, Mixtral 8×7B, Phi-MoE, and Deepseek mitigated
+on-demand loading overhead through prefetching, achieving 1.68× , 1.39×, and 1.96× speedup versus baseline respectively. To implement batched I/O operations, we must build
+upon the worker prefetch mechanism. Thus, we conduct
+the batched I/O operations ablation experiment as shown in
+Figure 12. This batched I/O approach effectively eliminates
+the switching overhead between I/O tasks and computation
+tasks, resulting in speedup ratios of 1.80×, 1.59×, and 1.96×
+compared to the baseline Mixtral, Phi-MoE, and Deepseek
+respectively.
+
+The experiments across all benchmarks demonstrate a
+distinct U-shaped relationship with increasing cutoff layer,
+which indicates that the end-to-end performance is increasing as cutoff layer rises from 0 to around 20. Then, it is followed by a recovery trend beyond at the point of 20 where
+higher prefetch counts ultimately lead to worse TPOT across
+different datasets. This suggests that excessive prefetching
+results in poor performance. This trend highlights the importance of balancing the cutoff layer to maximize the benefit
+of SP-MoE. When we switch to the Phi-MoE model, the
+relationship between the cuoff layer and end-to-end performance also exhibits this U-shaped pattern. It is resulted from
+that the drafting stage duration is unable to fully overlap
+with excessive expert loading times, mirroring the fundamental limitation we observed in the architecture of Mixtral
+8×7B. However, when testing with the DeepSeek model, Figure 14 shows a consistently improving trend as cutoff layer
+increases, unlike the U-shaped pattern observed earlier. This
+linear progression occurs because the drafting stage duration fully overlaps with the expert loading time of each layer,
+avoiding the synchronization overhead between the drafting
+stage and the target stage, which would arise from excessive
+prefetching. Therefore, progressively increasing the cutoff
+layer achieves sustained latency reduction without considering the performance optimization threshold observed in
+other models, demonstrating that the Deepseek model pair
+is able to capitalize on the aggressive prefetching strategy.
+
+5.5 Impact of the Draft Token Length
+To validate the effectiveness of SP-MoE using SD, we vary
+the draft token length and compare the performance of
+four framework across three environments using the HumanEval [21] dataset on Mixtral 8×7B.
+As shown in Figure 13, SP-MoE consistently outperforms
+all baselines across RTX 3090, RTX 4090, and A100 environments, achieving the lowest TPOT in all test cases. Its advantage is most pronounced on 3090, where it delivers 15-20%
+lower TPOT than AdapMoE, the top-performing baseline,
+while maintaining a 5-8% lead even on high-performance
+A100 systems. SP-MoE shows stronger scalability with longer
+draft tokens and consistent hardware optimization. As draft
+token length increases, the performance gap with other baselines narrows naturally due to SD. Longer draft token length
+requires activating more experts, potentially reaching fullexpert activation, which increases expert loading overhead.
+In such case, expert prediction accuracy becomes less critical, shifting focus to overlapping loading with computation.
+This constrains SpecMoE’s optimization space, yielding only
+marginal gains. However, longer draft token length reduces
+target model iterations while providing prefetching time
+during drafting to hide expert loading time, ultimately maintaining SP-MoE’s performance advantage.
+5.6
+
+Conference’17, July 2017, Washington, DC, USA
+
+6
+
+Related Work
+
+The related works can be systematically organized into three
+primary categories for efficient inference of MoE-based large
+language models.
+Expert parameter management via dynamic offloading
+and caching. This category encompasses systems designed
+to address the memory bottlenecks of MoE models by optimizing the storage, transfer, and prediction of experts. Key
+contributions include prefetching and caching mechanisms
+such as MoE-Infinity [43], which employs activation-aware
+
+Impact of the Cutoff Layer
+
+To validate that prefetched excessive experts impacts endto-end performance, we adjusted cutoff layer across three
+model pairs, as illustrated in Figure 14.
+11
+
+Conference’17, July 2017, Washington, DC, USA
+
+Trovato et al.
+
+expert tracing for sequence-level prefetching, and Mixtraloffloading [7], which combines an LRU cache with quantization to accelerate expert loading. SwapMoE [18] dynamically
+retains a subset of critical experts in GPU memory to minimize offloading overhead, while Pre-gated MoE [15] and
+SiDA [6] modify the routing logic through pre-computed
+gates or hash-based selection to enable early expert prediction. However, many approaches introduce trade-offs,
+such as restricted expert subsets or altered routing accuracy,
+which may compromise model fidelity.
+System-level optimization for LLM inference. This category includes frameworks that enhance inference efficiency
+through architectural innovations. Generic LLM optimizers
+such as vLLM [19] and DeepSpeed-Inference [14] employ
+memory pooling and computational graph optimizations to
+improve throughput for dense models, yet lack specialized
+support for MoE architectures. Edge-oriented systems like
+ProMoE [32] and Fate [8] prioritize low-latency inference
+on resource-constrained devices: ProMoE utilizes a learned
+predictor to prefetch experts without modifying MoE layers, while Fate adopts adaptive expert parallelism combined
+with offloading, explicitly supporting modular integration
+of quantization and pruning to further reduce memory demands. Sparsity-aware frameworks such as DejaVu [26] and
+PowerInfer [33] exploit activation sparsity in LLMs, partitioning parameters into hot and cold subsets based on usage
+frequency, and leverage pruning or quantization to minimize
+computational costs. However, these prior works ignore the
+issue of increased loading overhead caused by multiple drafttoken-triggered expert activations, under the speculative
+decoding and offloading mechanisms.
+Efficient speculative decoding methods. Speculative decoding [20] follows the "Draft-then-Verify" paradigm to reduce the iteration of the target model. SpecInfer [29] introduces a tree-based attention mechanism to enable more efficient parallel verification. SpecExec [36] takes the most probable continuations from the draft model to build a “cache”
+tree for the target model, which then gets validated in a
+single pass. Medusa [3], Eagle-2 [22], and Eagle-3 [23] enhance drafting efficiency by reusing the target model’s feature representations. Other works [10, 25, 35, 44, 45] also
+reuse partial weights of the target model to achieve efficient
+drafting. All of these methods focus on improving draft token acceptance rates by optimizing draft model design. Their
+techniques are orthogonal and complementary to our systemlevel methods, and can be readily integrated with SP-MoE
+to further enhance end-to-end inference performance.
+
+7
+
+shows significant improvements in throughput for large
+batch sizes. However, in MoE-based LLMs, increasing the
+batch size leads to more on-demand loading of activated experts, which makes the impact of I/O overhead more severe.
+Additionally, for different requests within the same batch,
+there is no clear correlation between the sets of activated
+experts across tokens. This uncorrelated token-triggered expert activation pattern significantly introduce the challenge
+of the effectiveness of expert reuse and caching, which we
+will leave for future work.
+Sequential drafting simplifies analysis but limits generality. Speculative decoding can generate draft tokens either
+sequentially [20] or as trees [22, 29]. SP-MoE adopts greedy
+decoding to ensure system stability and maintain a high
+acceptance rate in verification stage. For future work, we
+plan to explore sampling decoding strategy to investigate
+the relationship between draft token sampling distribution
+and expert activation distribution. The sampling temperature is particularly crucial here as it directly influences draft
+token sampling distribution. Lower temperature increases
+the likelihood of sampling higher-probability draft tokens
+that are more likely to be accepted by the target model, while
+high temperature increases the likelihood of sampling lowerprobability draft tokens that risk rejection, introducing the
+overhead of draft token generation without effectively reducing iteration counts. Improper temperature selection may
+also affects draft token sampling distribution, induces variability in expert activation, and complicates expert activation
+prediction.
+Implementation Insight: Cost of Copy-Back Operations. Mixtral-Offloading [7] adopts a cross-device strategy,
+storing some experts on the GPU and others on the CPU.
+When evicting experts cached in GPU, it must copy them
+back to CPU memory, incurring two costly transfers: (1)
+loading from CPU to GPU and (2) offloading from GPU to
+CPU. Because only a small fraction of experts are cached on
+the GPU at any time, we instead adopt a classic space–time
+tradeoff, keeping all experts on the CPU. This eliminates
+GPU-to-CPU offloading, as done by AdapMoE [47].
+
+8
+
+Conclusion and Future Work
+
+This paper presents SP-MoE, a system for efficient MoEbased LLM inference on resource-constrained devices. By
+combining expert offloading with speculative decoding, SpecMoE exploits SD’s two-stage structure for accurate draftstage prefetching and introduces a pipelined runtime with
+asynchronous prefetching and batched I/O to eliminate bandwidth contention. Extensive experiments show that SP-MoE
+achieves a 1.07×–3.5× TPOT speedup over SD-enabled stateof-the-art methods such as Mixtral-Offloading, MoE-Infinity,
+and AdapMoE across diverse datasets, environments, and
+MoE-based models. The maximum gain is a 3.5× speedup
+over Mixtral-Offloading with the Deepseek-Lite model on
+
+Lessons and Discussion
+
+Large batch sizes amplify I/O bottlenecks. It is demonstrated in Eagle-3 [23] that the speedup ratios of consumergrade frameworks like vLLM [19] and SGLang [46] under
+different batch sizes. Compared to Eagle [22], Eagle-3 [23]
+12
+
+SP-MoE : Speculative Decoding and Prefetching for Accelerating MoE-based Model Inference
+
+HumanEval using an A100 GPU, while the minimum is a
+1.07× speedup over AdapMoE with the Deepseek-Lite model
+on HumanEval, also on an A100 GPU.
+Finally, future extensions of SP-MoE include: (i) supporting tree-based drafting and sampling-based decoding to broaden
+applicability; (ii) improving prefetch accuracy, such as leveraging cross-layer or adaptive gating; and (iii) integrating
+with system-level optimizations for batching, scheduling,
+and memory management to enable deployment in multitenant and large-scale serving environments.
+
+References
+[1] Marah Abdin, Jyoti Aneja, Harkirat Behl, Sébastien Bubeck, Ronen
+Eldan, Suriya Gunasekar, Michael Harrison, Russell J Hewett, Mojan
+Javaheripi, Piero Kauffmann, et al. 2024. Phi-4 technical report. arXiv
+preprint arXiv:2412.08905 (2024).
+[2] Josh Achiam, Steven Adler, Sandhini Agarwal, Lama Ahmad, Ilge
+Akkaya, Florencia Leoni Aleman, Diogo Almeida, Janko Altenschmidt,
+Sam Altman, Shyamal Anadkat, et al. 2023. Gpt-4 technical report.
+arXiv preprint arXiv:2303.08774 (2023).
+[3] Tianle Cai, Yuhong Li, Zhengyang Geng, Hongwu Peng, Jason D Lee,
+Deming Chen, and Tri Dao. 2024. Medusa: Simple llm inference acceleration framework with multiple decoding heads. arXiv preprint
+arXiv:2401.10774 (2024).
+[4] Charlie Chen, Sebastian Borgeaud, Geoffrey Irving, Jean-Baptiste
+Lespiau, Laurent Sifre, and John Jumper. 2023. Accelerating large
+language model decoding with speculative sampling. arXiv preprint
+arXiv:2302.01318 (2023).
+[5] Denis Mazur. [n. d.]. dvmazur/ysda-cv-week-final-model. https:
+//huggingface.co/dvmazur/ysda-cv-week-final-model.
+[6] Zhixu Du, Shiyu Li, Yuhao Wu, Xiangyu Jiang, Jingwei Sun, Qilin
+Zheng, Yongkai Wu, Ang Li, Hai Li, and Yiran Chen. 2024. Sida:
+Sparsity-inspired data-aware serving for efficient and scalable large
+mixture-of-experts models. Proceedings of Machine Learning and Systems 6 (2024), 224–238.
+Fast inference of
+[7] Artyom Eliseev and Denis Mazur. 2023.
+mixture-of-experts language models with offloading. arXiv preprint
+arXiv:2312.17238 (2023).
+[8] Zhiyuan Fang, Zicong Hong, Yuegui Huang, Yufeng Lyu, Wuhui Chen,
+Yue Yu, Fan Yu, and Zibin Zheng. 2025. Accurate Expert Predictions in
+MoE Inference via Cross-Layer Gate. arXiv e-prints (2025), arXiv–2502.
+[9] Zhiyuan Fang, Yuegui Huang, Zicong Hong, Yufeng Lyu, Wuhui Chen,
+Yue Yu, Fan Yu, and Zibin Zheng. 2025. Klotski: Efficient Mixture-ofExpert Inference via Expert-Aware Multi-Batch Pipeline. In Proceedings
+of the 30th ACM International Conference on Architectural Support for
+Programming Languages and Operating Systems, Volume 2. 574–588.
+[10] Yichao Fu, Peter Bailis, Ion Stoica, and Hao Zhang. 2024. Break the
+sequential dependency of llm inference using lookahead decoding.
+arXiv preprint arXiv:2402.02057 (2024).
+[11] Freddy Gabbay and Avi Mendelson. 1996. Speculative execution based
+on value prediction. Citeseer.
+[12] Joao Gante. 2023. Assisted generation: a new direction toward lowlatency text generation.
+[13] Ahmad Ghazal, Tilmann Rabl, Minqing Hu, Francois Raab, Meikel
+Poess, Alain Crolotte, and Hans-Arno Jacobsen. 2013. Bigbench: Towards an industry standard benchmark for big data analytics. In Proceedings of the 2013 ACM SIGMOD international conference on Management of data. 1197–1208.
+[14] Connor Holmes, Masahiro Tanaka, Michael Wyatt, Ammar Ahmad Awan, Jeff Rasley, Samyam Rajbhandari, Reza Yazdani Aminabadi, Heyang Qin, Arash Bakhtiari, Lev Kurilenko, et al. 2024.
+Deepspeed-fastgen: High-throughput text generation for llms via mii
+13
+
+Conference’17, July 2017, Washington, DC, USA
+
+and deepspeed-inference. arXiv preprint arXiv:2401.08671 (2024).
+[15] Ranggi Hwang, Jianyu Wei, Shijie Cao, Changho Hwang, Xiaohu
+Tang, Ting Cao, and Mao Yang. 2024. Pre-gated moe: An algorithmsystem co-design for fast and scalable mixture-of-expert inference.
+In 2024 ACM/IEEE 51st Annual International Symposium on Computer
+Architecture (ISCA). IEEE, 1018–1031.
+[16] Albert Q Jiang, Alexandre Sablayrolles, Antoine Roux, Arthur Mensch,
+Blanche Savary, Chris Bamford, Devendra Singh Chaplot, Diego de las
+Casas, Emma Bou Hanna, Florian Bressand, et al. 2024. Mixtral of
+experts. arXiv preprint arXiv:2401.04088 (2024).
+[17] Gueyoung Jung, Matti A Hiltunen, Kaustubh R Joshi, Richard D
+Schlichting, and Calton Pu. 2010. Mistral: Dynamically managing
+power, performance, and adaptation cost in cloud infrastructures. In
+2010 IEEE 30th International Conference on Distributed Computing Systems. IEEE, 62–73.
+[18] Rui Kong, Yuanchun Li, Qingtian Feng, Weijun Wang, Xiaozhou Ye, Ye
+Ouyang, Linghe Kong, and Yunxin Liu. 2023. SwapMoE: Serving Offthe-shelf MoE-based Large Language Models with Tunable Memory
+Budget. arXiv preprint arXiv:2308.15030 (2023).
+[19] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin
+Zheng, Cody Hao Yu, Joseph Gonzalez, Hao Zhang, and Ion Stoica.
+2023. Efficient memory management for large language model serving
+with pagedattention. In Proceedings of the 29th Symposium on Operating
+Systems Principles. 611–626.
+[20] Yaniv Leviathan, Matan Kalman, and Yossi Matias. 2023. Fast inference
+from transformers via speculative decoding. In International Conference
+on Machine Learning. PMLR, 19274–19286.
+[21] Daniel Li and Lincoln Murr. 2024. HumanEval on Latest GPT Models–
+2024. arXiv preprint arXiv:2402.14852 (2024).
+[22] Yuhui Li, Fangyun Wei, Chao Zhang, and Hongyang Zhang. 2024.
+Eagle: Speculative sampling requires rethinking feature uncertainty.
+arXiv preprint arXiv:2401.15077 (2024).
+[23] Yuhui Li, Fangyun Wei, Chao Zhang, and Hongyang Zhang. 2025.
+Eagle-3: Scaling up inference acceleration of large language models
+via training-time test. arXiv preprint arXiv:2503.01840 (2025).
+[24] Aixin Liu, Bei Feng, Bin Wang, Bingxuan Wang, Bo Liu, Chenggang
+Zhao, Chengqi Dengr, Chong Ruan, Damai Dai, Daya Guo, et al. 2024.
+Deepseek-v2: A strong, economical, and efficient mixture-of-experts
+language model. arXiv preprint arXiv:2405.04434 (2024).
+[25] Fangcheng Liu, Yehui Tang, Zhenhua Liu, Yunsheng Ni, Kai Han, and
+Yunhe Wang. 2024. Kangaroo: Lossless self-speculative decoding via
+double early exiting. arXiv preprint arXiv:2404.18911 (2024).
+[26] Zichang Liu, Jue Wang, Tri Dao, Tianyi Zhou, Binhang Yuan, Zhao
+Song, Anshumali Shrivastava, Ce Zhang, Yuandong Tian, Christopher
+Re, et al. 2023. Deja vu: Contextual sparsity for efficient llms at inference time. In International Conference on Machine Learning. PMLR,
+22137–22176.
+[27] Stephen Merity, Caiming Xiong, James Bradbury, and Richard Socher.
+2016. Pointer sentinel mixture models. arXiv preprint arXiv:1609.07843
+(2016).
+[28] Xupeng Miao, Gabriele Oliaro, Zhihao Zhang, Xinhao Cheng, Hongyi
+Jin, Tianqi Chen, and Zhihao Jia. 2023. Towards efficient generative
+large language model serving: A survey from algorithms to systems.
+arXiv preprint arXiv:2312.15234 (2023).
+[29] Xupeng Miao, Gabriele Oliaro, Zhihao Zhang, Xinhao Cheng, Zeyu
+Wang, Zhengxin Zhang, Rae Ying Yee Wong, Alan Zhu, Lijie Yang,
+Xiaoxiang Shi, et al. 2024. Specinfer: Accelerating large language
+model serving with tree-based speculative inference and verification.
+In Proceedings of the 29th ACM International Conference on Architectural
+Support for Programming Languages and Operating Systems, Volume 3.
+932–949.
+[30] C Shanon. 1948. A mathematical theory of communication. The Bell
+systems technical journal, 27. Mathematical Reviews (MathSciNet)
+(1948).
+
+Conference’17, July 2017, Washington, DC, USA
+
+Trovato et al.
+
+[31] James E Smith. 1998. A study of branch prediction strategies. In 25
+years of the international symposia on Computer architecture (selected
+papers). 202–215.
+[32] Xiaoniu Song, Zihang Zhong, Rong Chen, and Haibo Chen. 2024.
+Promoe: Fast moe-based llm serving using proactive caching. arXiv
+preprint arXiv:2410.22134 (2024).
+[33] Yixin Song, Zeyu Mi, Haotong Xie, and Haibo Chen. 2024. Powerinfer:
+Fast large language model serving with a consumer-grade gpu. In
+Proceedings of the ACM SIGOPS 30th Symposium on Operating Systems
+Principles. 590–606.
+[34] Mitchell Stern, Noam Shazeer, and Jakob Uszkoreit. 2018. Blockwise
+parallel decoding for deep autoregressive models. Advances in Neural
+Information Processing Systems 31 (2018).
+[35] Hanshi Sun, Zhuoming Chen, Xinyu Yang, Yuandong Tian, and Beidi
+Chen. 2024. Triforce: Lossless acceleration of long sequence generation
+with hierarchical speculative decoding. arXiv preprint arXiv:2404.11912
+(2024).
+[36] Ruslan Svirschevski, Avner May, Zhuoming Chen, Beidi Chen, Zhihao
+Jia, and Max Ryabinin. 2024. Specexec: Massively parallel speculative
+decoding for interactive llm inference on consumer devices. Advances
+in Neural Information Processing Systems 37 (2024), 16342–16368.
+[37] Peng Tang, Jiacheng Liu, Xiaofeng Hou, Yifei Pu, Jing Wang, PhengAnn Heng, Chao Li, and Minyi Guo. 2024. Hobbit: A mixed precision expert offloading system for fast moe inference. arXiv preprint
+arXiv:2411.01433 (2024).
+[38] Hugo Touvron, Thibaut Lavril, Gautier Izacard, Xavier Martinet, MarieAnne Lachaux, Timothée Lacroix, Baptiste Rozière, Naman Goyal, Eric
+Hambro, Faisal Azhar, et al. 2023. Llama: Open and efficient foundation
+language models. arXiv preprint arXiv:2302.13971 (2023).
+[39] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion
+Jones, Aidan N Gomez, Łukasz Kaiser, and Illia Polosukhin. 2017. Attention is all you need. Advances in neural information processing
+systems 30 (2017).
+[40] Yubo Wang, Xueguang Ma, Ge Zhang, Yuansheng Ni, Abhranil Chandra, Shiguang Guo, Weiming Ren, Aaran Arulraj, Xuan He, Ziyan
+Jiang, et al. 2024. Mmlu-pro: A more robust and challenging multi-task
+language understanding benchmark. Advances in Neural Information
+Processing Systems 37 (2024), 95266–95290.
+[41] Thomas Wolf, Lysandre Debut, Victor Sanh, Julien Chaumond,
+Clement Delangue, Anthony Moi, Pierric Cistac, Tim Rault, Rémi Louf,
+Morgan Funtowicz, Joe Davison, Sam Shleifer, Patrick von Platen,
+Clara Ma, Yacine Jernite, Julien Plu, Canwen Xu, Teven Le Scao, Sylvain Gugger, Mariama Drame, Quentin Lhoest, and Alexander M. Rush.
+2020. Transformers: State-of-the-Art Natural Language Processing.
+In Proceedings of the 2020 Conference on Empirical Methods in Natural
+Language Processing: System Demonstrations. Association for Computational Linguistics, Online, 38–45. https://www.aclweb.org/anthology/
+2020.emnlp-demos.6
+[42] Heming Xia, Tao Ge, Si-Qing Chen, Furu Wei, and Zhifang Sui. 2022.
+Speculative decoding: Lossless speedup of autoregressive translation.
+(2022).
+[43] Leyang Xue, Yao Fu, Zhan Lu, Luo Mai, and Mahesh Marina. 2024.
+MoE-Infinity: Offloading-Efficient MoE Model Serving. arXiv preprint
+arXiv:2401.14361 (2024).
+[44] Hanling Yi, Feng Lin, Hongbin Li, Peiyang Ning, Xiaotian Yu, and
+Rong Xiao. 2024. Generation meets verification: Accelerating large
+language model inference with smart parallel auto-correct decoding.
+arXiv preprint arXiv:2402.11809 (2024).
+[45] Jun Zhang, Jue Wang, Huan Li, Lidan Shou, Ke Chen, Gang Chen,
+and Sharad Mehrotra. 2023. Draft & verify: Lossless large language
+model acceleration via self-speculative decoding. arXiv preprint
+arXiv:2309.08168 (2023).
+[46] Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Livia Sun,
+Jeff Huang, Cody Hao Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica,
+
+Joseph E Gonzalez, et al. 2024. Sglang: Efficient execution of structured
+language model programs. Advances in neural information processing
+systems 37 (2024), 62557–62583.
+[47] Shuzhang Zhong, Ling Liang, Yuan Wang, Runsheng Wang, Ru Huang,
+and Meng Li. 2024. Adapmoe: Adaptive sensitivity-based expert gating
+and management for efficient moe inference. In Proceedings of the 43rd
+IEEE/ACM International Conference on Computer-Aided Design. 1–9.
+
+14
+
+

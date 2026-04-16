@@ -3,10 +3,12 @@
 
 Reads results/phase_transition/{ar,sd}_offload_<GB>/result.json
 and pcie_dmon.csv to produce:
-  - Left panel:  TPS vs CPU Offload  (AR & SD curves)
-  - Right panel: SD/AR speedup ratio vs CPU Offload (with 1.0× line)
+    - phase_transition_tps.{pdf,png}: TPS vs CPU Offload  (AR & SD curves)
+    - phase_transition_speedup.{pdf,png}: SD/AR speedup ratio vs CPU Offload
+        (with 1.0× line)
 
-Output: results/phase_transition/phase_transition.{pdf,png}
+Also keeps PCIe figure output:
+    - phase_transition_pcie.{pdf,png}
 """
 
 import json
@@ -19,7 +21,7 @@ import numpy as np
 RESULT_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "..", "results", "phase_transition"
 )
-OFFLOAD_VALUES = [20, 25, 30, 35, 40, 45]
+OFFLOAD_VALUES = [0,5,10,15,20, 25, 30, 35, 40, 45]
 MODEL_SIZE_GB = 57.0  # Qwen3-30B-A3B in BF16 (approximate)
 
 
@@ -76,7 +78,7 @@ def parse_pcie_dmon(path):
     return sum(rxvals) / len(rxvals) if rxvals else None
 
 
-def plot(offloads, ar_tps, sd_tps, ar_pcie, sd_pcie):
+def plot_tps(offloads, ar_tps, sd_tps):
     # ---- Style ----
     plt.rcParams.update({
         "font.family": "serif",
@@ -86,15 +88,14 @@ def plot(offloads, ar_tps, sd_tps, ar_pcie, sd_pcie):
         "ytick.major.width": 1.0,
     })
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    fig, ax = plt.subplots(figsize=(7.2, 4.8))
 
     offs = np.array(offloads)
     ar = np.array(ar_tps)
     sd = np.array(sd_tps)
     gpu_pct = (MODEL_SIZE_GB - offs) / MODEL_SIZE_GB * 100.0
 
-    # ================== Left: TPS vs Offload ==================
-    ax = axes[0]
+    # ================== TPS vs Offload ==================
     ax.plot(offs, ar, "o-", label="AR (Autoregressive)", color="#1f77b4",
             linewidth=2, markersize=7, zorder=3)
     ax.plot(offs, sd, "s-", label="SD (Speculative Decoding)", color="#ff7f0e",
@@ -140,8 +141,24 @@ def plot(offloads, ar_tps, sd_tps, ar_pcie, sd_pcie):
     ax2.set_xticklabels([f"{p:.0f}%" for p in gpu_pct], fontsize=9)
     ax2.set_xlabel("Model on GPU (%)", fontsize=10)
 
-    # ================== Right: Speedup Ratio ==================
-    ax = axes[1]
+    # ================== Save ==================
+    plt.tight_layout()
+    for ext in ("pdf", "png"):
+        out = os.path.join(RESULT_DIR, f"phase_transition_tps.{ext}")
+        fig.savefig(out, dpi=200, bbox_inches="tight")
+        print(f"Saved: {out}")
+    plt.close()
+
+
+def plot_speedup(offloads, ar_tps, sd_tps):
+    offs = np.array(offloads)
+    ar = np.array(ar_tps)
+    sd = np.array(sd_tps)
+    gpu_pct = (MODEL_SIZE_GB - offs) / MODEL_SIZE_GB * 100.0
+    tick_positions = offs
+
+    fig, ax = plt.subplots(figsize=(7.2, 4.8))
+
     speedups = sd / ar
     ax.plot(offs, speedups, "D-", color="#2ca02c", linewidth=2, markersize=7, zorder=3)
     ax.axhline(y=1.0, color="#d62728", ls="--", alpha=0.6, lw=1.2, label="Break-even (1.0×)")
@@ -167,7 +184,7 @@ def plot(offloads, ar_tps, sd_tps, ar_pcie, sd_pcie):
     # ================== Save ==================
     plt.tight_layout()
     for ext in ("pdf", "png"):
-        out = os.path.join(RESULT_DIR, f"phase_transition.{ext}")
+        out = os.path.join(RESULT_DIR, f"phase_transition_speedup.{ext}")
         fig.savefig(out, dpi=200, bbox_inches="tight")
         print(f"Saved: {out}")
     plt.close()
@@ -223,7 +240,8 @@ def main():
     print(f"  AR TPS: {[f'{t:.2f}' for t in ar_tps]}")
     print(f"  SD TPS: {[f'{t:.2f}' for t in sd_tps]}")
 
-    plot(offloads, ar_tps, sd_tps, ar_pcie, sd_pcie)
+    plot_tps(offloads, ar_tps, sd_tps)
+    plot_speedup(offloads, ar_tps, sd_tps)
     plot_pcie(offloads, ar_tps, sd_tps, ar_pcie, sd_pcie)
 
 

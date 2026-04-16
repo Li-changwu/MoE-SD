@@ -20,12 +20,30 @@
 set -euo pipefail
 
 # ── Paths ──
-PYTHON="/opt/miniconda3/envs/moe-sd/bin/python"
-RUNNER="/root/MoE-SD/scripts/bench_humaneval_runner.py"
-MODEL="/root/models/Qwen3-30B-A3B-Instruct-2507"
-SPECULATOR="/root/models/Qwen3-30B-A3B-Instruct-2507-speculator.eagle3"
-DATASET="/root/MoE-SD/data/humaneval_bench.jsonl"
-RESULT_DIR="/root/MoE-SD/results/briskmoe_humaneval"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+
+DEFAULT_PYTHON_CANDIDATES=(
+    "/home/cdb/miniforge3/envs/briskmoe/bin/python"
+    "/opt/miniconda3/envs/moe-sd/bin/python"
+)
+if [[ -n "${PYTHON:-}" ]]; then
+    :
+else
+    for candidate in "${DEFAULT_PYTHON_CANDIDATES[@]}"; do
+        if [[ -x "$candidate" ]]; then
+            PYTHON="$candidate"
+            break
+        fi
+    done
+    PYTHON="${PYTHON:-python3}"
+fi
+
+RUNNER="${RUNNER:-$REPO_ROOT/scripts/bench_humaneval_runner.py}"
+MODEL="${MODEL:-$REPO_ROOT/model/Qwen3-30B-A3B-Instruct-2507}"
+SPECULATOR="${SPECULATOR:-$REPO_ROOT/model/Qwen3-30B-A3B-Instruct-2507-speculator.eagle3}"
+DATASET="${DATASET:-$REPO_ROOT/data/humaneval_bench.jsonl}"
+RESULT_DIR="${RESULT_DIR:-$REPO_ROOT/results/briskmoe_humaneval}"
 
 # ── Benchmark Parameters ──
 OUTPUT_LEN=128
@@ -80,6 +98,19 @@ run_bench() {
 
 # ── Ensure result directory ──
 mkdir -p "$RESULT_DIR"
+
+# ── GPU selection ──
+if [[ -z "${CUDA_VISIBLE_DEVICES:-}" ]] && command -v nvidia-smi >/dev/null 2>&1; then
+    best_gpu="$(nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits \
+        | sort -t',' -k2 -nr \
+        | head -n1 \
+        | cut -d',' -f1 \
+        | tr -d '[:space:]')"
+    if [[ -n "$best_gpu" ]]; then
+        export CUDA_VISIBLE_DEVICES="$best_gpu"
+        echo "[$(timestamp)] Auto-selected GPU index: $CUDA_VISIBLE_DEVICES (max free memory)"
+    fi
+fi
 
 # ── GPU check ──
 echo "========================================"
@@ -213,11 +244,11 @@ echo "================================================================"
 echo "[$(timestamp)] Parsing results..."
 echo "================================================================"
 
-$PYTHON << 'PYEOF'
+RESULT_DIR_ENV="$RESULT_DIR" "$PYTHON" << 'PYEOF'
 import json
 import os
 
-result_dir = "/root/MoE-SD/results/briskmoe_humaneval"
+result_dir = os.environ["RESULT_DIR_ENV"]
 labels = [
     "ar_vanilla",
     "sd_vanilla",

@@ -1,0 +1,1387 @@
+AdapMoE: Adaptive Sensitivity-based Expert Gating
+and Management for Efficient MoE Inference
+Shuzhang Zhong1,2 , Ling Liang2 , Yuan Wang2,4 , Runsheng Wang2,3,4 , Ru Huang2,3,4 , Meng Li1,2,4∗
+1 Institute for Artificial Intelligence & 2 School of Integrated Circuits, Peking University, Beijing, China
+3 Institute of Electronic Design Automation, Peking University, Wuxi, China
+4 Beijing Advanced Innovation Center for Integrated Circuits, Beijing, China
+
+arXiv:2408.10284v1 [cs.LG] 19 Aug 2024
+
+Abstract
+Mixture-of-Experts (MoE) models are designed to enhance
+the efficiency of large language models (LLMs) without proportionally increasing the computational demands. However, their deployment on edge devices still faces significant
+challenges due to high on-demand loading overheads from
+managing sparsely activated experts. This paper introduces
+AdapMoE, an algorithm-system co-design framework for
+efficient MoE inference. AdapMoE features adaptive expert
+gating and management to reduce the on-demand loading
+overheads. We observe the heterogeneity of experts loading across layers and tokens, based on which we propose a
+sensitivity-based strategy to adjust the number of activated
+experts dynamically. Meanwhile, we also integrate advanced
+prefetching and cache management techniques to further
+reduce the loading latency. Through comprehensive evaluations on various platforms, we demonstrate AdapMoE consistently outperforms existing techniques, reducing the average
+number of activated experts by 25% and achieving a 1.35×
+speedup without accuracy degradation. Code is available at:
+https://github.com/PKU-SEC-Lab/AdapMoE.
+
+1
+
+Introduction
+
+Mixture-of-Experts (MoE) [15] models are designed to relieve
+the high compute requirements of large language models
+(LLMs) by introducing sparsely activated pathways. The
+feedforward block in MoE uses a gating function to select
+from different parameter groups, allowing the model to scale
+in size without a corresponding increase in computation. For
+instance, in the Mixtral-8x7b model, each token can access
+∗ Corresponding Author, meng.li@pku.edu.cn
+
+Permission to make digital or hard copies of all or part of this work for
+personal or classroom use is granted without fee provided that copies
+are not made or distributed for profit or commercial advantage and that
+copies bear this notice and the full citation on the first page. Copyrights
+for components of this work owned by others than the author(s) must
+be honored. Abstracting with credit is permitted. To copy otherwise, or
+republish, to post on servers or to redistribute to lists, requires prior specific
+permission and/or a fee. Request permissions from permissions@acm.org.
+ICCAD ’24, October 27–31, 2024, New York, NY, USA
+© 2024 Copyright held by the owner/author(s). Publication rights licensed
+to ACM.
+ACM ISBN 979-8-4007-1077-3/24/10
+https://doi.org/10.1145/3676536.3676741
+
+A100
+
+4090
+
+GPU SRAM
+
+SRAM size 108x164 KB 128x128 KB
+HBM
+Bandwidth
+
+2 TB/s
+
+1 TB/s
+
+GPU HBM
+
+HBM Size
+
+80 GB
+
+24 GB
+
+Host2Device
+Bandwidth
+
+16 GB/s
+
+16 GB/s
+
+DRAM Size
+
+~1TB
+
+~128GB
+
+CPU DRAM
+
+(a)
+Compute
+Memory
+
+(b)
+
+Non-MoE
+
+Expert 1
+Load Expert 1
+
+Expert 2
+Load Expert 2
+
+(c)
+
+Figure 1. GPU resource utilization and task execution timeline: (a) hardware specs comparison between NVIDIA A100
+and 4090 GPUs; (b) GPU time distribution; (c) task timeline
+with offloading.
+
+47 billion parameters, yet only 13 billion active parameters
+are utilized during each inference iteration [9].
+Unfortunately, the substantial memory requirements of
+MoE makes it difficult to be deployed, especially on edge devices with limited memory. A common solution is offloading,
+where expert weights are stored on CPU memory, SSDs, or
+Flash storage and loaded into the GPU only when needed
+[1, 14, 15]. However, the approach of dynamically loading
+activated experts on-demand leads to the serialization of
+the expert selection phase with the expert execution phase,
+thereby introducing significant performance overhead.
+The main bottleneck in MoE inference is attributed to the
+on-demand loading of experts. As illustrated in Figure 1,
+this loading phase constitutes the majority of the latency
+during MoE inference, primarily due to the substantial communication scale and limited bandwidth available.
+Faced with these challenges, existing works have explored
+several efficient MoE inference techniques. Adap-gating [11]
+allows tokens to be processed by a variable number of experts
+based on expert probability distribution. Though efficient,
+the heuristic gating criteria will lead to low accuracy compared with original fixed top-k routing. Mixtral-offloading
+[5] observes token-wise expert selection similarities and
+adopts least recently used(LRU) algorithm to manage the
+expert cache. Its fixed cache allocation strategy across each
+layer limits its adaptability and effectiveness. MoE-Infinity
+[17] observes correlations in expert selection across layers,
+
+using previous layers’ activations to predict subsequent expert activations. However, its straightforward predictive approach results in lower prefetching accuracy. Pre-gated MoE
+[8] modifies the structure of MoE, in which the experts are
+selected based on the previous layers’ activation. Despite
+its ability to accurately predict expert usage and execute
+prefetching, the structural modifications will complicate direct deployment.
+Despite these advances in MoE inference techniques, all
+existing solutions fail to comprehensively address all the
+critical factors affecting system performance simultaneously.
+Specifically, there has been a lack of a formal optimization
+approach that integrates expert gating, prefetching, and
+caching within a unified framework. Adap-gating and Pregated MoE will even cause accuracy degradation if directly
+deployed without finetuning.
+In this work, we propose AdapMoE, an algorithm-system
+co-design framework that enables adaptive expert gating
+and management for MoE inference without accuracy degradation. We identify three critical factors that significantly
+influence the on-demand loading overhead: the number of
+activated experts, the accuracy of prefetching, and the cache
+hit probability. Targeting these factors, our contributions in
+designing AdapMoE include:
+• Adaptive and sensitivity-based expert gating. We
+propose an adaptive and sensitivity-based gating mechanism for the MoE inference process, which allows tokens to be processed by a dynamically flexible number
+of experts without accuracy degradation.
+• Adaptive expert prefetching. We observe the high
+similarities between activations in different layers and
+leverages the gating decisions of subsequent layers as
+predictive signals to prefetch experts for these layers
+in advance.
+• Adaptive cache allocation. We proposed a dynamic
+programming based formulation for the cache size allocation to minimize the on-demand loading overhead.
+• System implementation. We implement expert management of AdapMoE with fine-grained CUDA stream
+controller to maximize the overlap between communications and computations.
+We evaluate the performance of AdapMoE system using
+state-of-the-art Mixtral models on various platforms and
+datasets. Our adaptive gating algorithm can maintain high
+accuracy levels while significantly reducing the experts activation by 25% compared with traditional top-2 gating. AdapMoE consistently outperforms all the existing expert management methods by 1.35x.
+
+2
+
+Background
+
+2.1
+
+Mixture-of-Experts
+
+Mixture-of-Experts(MoE) [12] models present a solution
+to manage the extensive computational demands of LLMs
+
+through sparsely activated pathways, including Mixtral [9],
+NLLB-MoE [4], and SwitchTransformer [6]. A gating function 𝐺 (𝑥) determines which of several distinct parameter
+groups, or "experts," are activated for a given input:
+𝐺 (𝑥) = Softmax(TopK(𝑥 · 𝑊𝑔 ))
+
+(1)
+
+The MoE module outputs are determined by a weighted
+sum of individual expert outputs. Given N experts 𝐸 0, 𝐸 1 ,...,
+𝐸 𝑁 −1 , the output can be expressed as:
+𝑁
+−1
+∑︁
+
+𝐺 (𝑥)𝑖 · 𝐸𝑖 (𝑥),
+
+(2)
+
+𝑖=0
+
+The total number of experts N and the number of activated
+experts K vary among different MoE implementations. For
+instance, the Mixtral model employs 8 experts, with only 2
+being active at a time.
+2.2
+
+Efficient MoE Inference
+
+The substantial memory requirements of MoE makes it difficult to be deployed on edge devices with limited memory.
+To handle this problem, a typical solution is to offload model
+parameters into CPU memory or SSDs, such as DeepSpeed
+[1] and FlexGen [16]. However, they are designed for dense
+models and will load/prefetch all parameters, leading to unnecessary communication overhead.
+In response to the specific challenges posed by sparse
+expert activation in MoE models, various specialized MoE
+inference techniques have been developed, including Adapgating[11], EdgeMoe [19], MoE-Infinity [17], Mixtral-offloading
+[5] and Pre-gated MoE [8]. These frameworks propose several gating, prefetching or caching algorithm. Despite these
+advancements, many of these solutions still struggle with
+critical issues. For instance, frameworks like Adap-gating and
+Pre-gated MoE can experience significant accuracy degradation when directly deployed. These techniques fail to comprehensively address all key factors affecting accuracy and
+performance, which leads to suboptimal performance.
+
+3
+
+Motivations and observations
+
+The primary bottleneck in MoE edge inference is attributed
+to the on-demand loading of experts, a process that cannot
+be fully overlapped with computation and thus occupies a
+significant portion of the total inference time. To address this
+issue, we begin by analyzing the main factors that influence
+the frequency of on-demand loading:
+Number of activated experts: Reducing the number
+of activated experts can directly decrease the frequency of
+on-demand loading.
+Accuracy of prefetching: Accurate prefetching allows
+the overlap of expert loading with computation in subsequent layers, effectively eliminating performance impacts.
+Cache hit probability: If the required experts are already
+cached in memory, computations can be performed directly
+without on-demand loading.
+
+   
+
+ $ F W L Y D W D L R Q  & R V L Q H  6 L P L O D U L W L H V  % H W Z H H Q  / D \ H U V
+
+ 6 L P L O D U L W \
+
+   
+   
+   
+   
+   
+
+                                                                                   
+
+ / D \ H U
+
+4
+
+AdapMoE Design
+
+4.1
+
+Overview
+
+This paper introduces AdapMoE, an algorithm-system codesign for scalable and efficient MoE inference on edge devices. AdapMoE is designed to address the high latency overhead associated with the on-demand loading of experts during MoE inference. AdapMoE proposes (i) a sensitivity-based
+
+Prefetch Hit
+
+Expert 0
+Expert 1
++
+
+Expert 6
+Expert 7
+
+Adaptive Prefetch (Sec 4.3)
+
+Adaptive Gate (Sec 4.2)
+
+Adaptive Gate (Sec 4.2)
+
+Prefetch Miss
+
+Expert 0
+Expert 1
++
+
+…
+
+Targeting these factors, we make the following observations that motivate us to propose AdapMoE:
+Observation 1: Dynamic Expert Demand. Intuitively,
+the requirement for experts varies across different tokens
+and layers. As illustrated in Figure 2, some tokens exhibit a
+significantly biased weight distribution, necessitating fewer
+experts. Additionally, the relevance of different layers to
+the final output varies; layers of less importance can tolerate a reduction in the number of activated experts without
+substantial impact on the overall model performance. By
+activating fewer experts, the demand for on-demand loading
+overheads can be directly reduced.
+Observation 2: Similar intermediate activation. As
+shown in figure 3, the activations between successive layers
+exhibit a very high degree of similarity. This characteristic
+is due to the nature of the residual connections, which will
+accumulate the output of each layer, thus maintaining a
+consistency in the feature space as the depth increases. The
+similarity can be utilized to predict the experts needed in
+upcoming layers more accurately.
+Observation 3: Unbalanced expert cache demands.
+Different layers varies in the prefetching accuracy and required number of activated experts, leading to adaptive demands for cache size under different platforms. Effective
+cache management must adapt to these varied needs to optimize overall system performance, ensuring resources are
+used where they are most needed.
+
+Expert 0
+
+…
+
+Figure 2. Expert weight score distribution: (a) scores of top-1
+expert per layer; (b) (c) weight score distribution examples.
+
+Expert 6
+
+…
+
+Prefetch Gate
+
+Figure 3. Cosine similarities between the input of each
+layer’s moe block and the input of its next layer’s moe block.
+
+Expert 6
+Expert 7
+Cache Hit
+
+Cache Hit
+Expert 0
+
+Expert 1
+
+Adaptive Cache (Sec 4.4)
+
+Expert 7
+
+Figure 4. Overview of AdapMoE.
+
+adaptive gating mechanism that allows tokens to be processed by a dynamically flexible number of experts(Sec. 4.2),
+(ii) an expert prediction and adaptive prefetching algorithm
+that achieves high prefetching accuracy without modification and finetuning of models(Sec. 4.3), and (iii) a DP-based
+cache allocation algorithm to meet the unbalanced expert
+cache demands(Sec. 4.4).
+Figure 4 presents an architectural overview of AdapMoE.
+The system initially collects sensitivity and prediction data
+from a sampled dataset in the offline phase. Subsequently, it
+applies adaptive gating, prefetching, and caching during online operation. Adaptive gating will influence the prefetching
+algorithm, and both gating and prefetching will then guide
+caching decisions, optimizing resource allocation to match
+real-time data variability effectively.
+4.2
+
+Adaptive and Sensitivity-based Expert Gating
+
+As we plot in figure 2, the score distribution of experts differs
+among different tokens and different layers. The distribution clearly demonstrate an unbalanced pattern, where the
+required number of experts are different during inference.
+Therefore, the main task for adaptive expert gating is to find
+an optimal way to allocate distinct number of experts for
+each token in each layer.
+Thus, it is crucial to quantify the sensitivity of the gating
+mechanism to fluctuations in the number of experts per
+layer. We define a perturbation metric that measures the
+
+deviation in performance when varying the number of active
+experts. This metric allows us to establish a threshold𝑇 . If the
+perturbation is less than the threshold 𝑇 , the gating system
+can safely activate a smaller subset of experts.
+Let 𝑥 be the input of MoE block, 𝑓1 be the expert with
+highest score, 𝑓2 be the expert with the second highest score,
+𝛼 be the score of Top-1 expert after normalization in layer
+𝑖. The original output 𝑂 0 of the sparse moe block in layer 𝑖
+can be represented as:
+𝑂 0 = 𝛼 𝑓1 (𝑥) + (1 − 𝛼) 𝑓2 (𝑥)
+
+(3)
+
+If we conduct adaptive gating and only activate the first
+expert, the output O can be represented as:
+𝑂 = 𝑓1 (𝑥)
+
+Gate 4
+Gate 3
+
+Gate 5
+
+Adaptive
+Prefetch
+
+Gate 4
+
+Gate 2
+
+Gate 1
+
+Adaptive
+Prefetch
+
+Gate 3
+
+Experts
+in Layer 1
+
+...
+
+Gate 2
+
+Experts
+in Layer 2
+
+Figure 5. Adaptive prefetching workflow. Gate i represents the gating function in layer i. Adaptive gating enables
+prefetch multiple next layers’ experts.
+
+(4)
+
+To determine the influence of adaptive gating in each layer,
+we can perform Taylor series expansion to analyze how the
+model output changes in response to perturbations by the
+adaptive gating.
+1
+𝐿(𝑂) ≃ 𝐿(𝑂 0 ) + 𝑔𝑇 (𝑂 − 𝑂 0 ) + (𝑂 − 𝑂 0 )𝑇 𝐻 (𝑂 − 𝑂 0 )
+(5)
+2
+1
+≃ 𝐿(𝑂 0 ) + (1 − 𝛼) 2 (𝑓1 (𝑥) − 𝑓2 (𝑥))𝑇 𝐻 (𝑓1 (𝑥) − 𝑓2 (𝑥))
+2
+2
+
+𝜕
+where g is the gradient of 𝑂 0 and 𝐻 = 𝐸 [ 𝜕𝑂
+2 𝐿(𝑂 0 )] is the
+0
+second derivative (i.e, Hessian) of the loss at 𝑂 0 . Assuming the model has converged to a local minimum, we can
+approximate the gradient 𝑔 as being zero [10].
+Hessian matrices can be computed using a second backpropagation [18]; however, this approach is highly memoryintensive, making it impractical, especially for MoE models.
+To address these challenges, we adopt Fisher information
+matrix to approximate the hessian matrix following [10].
+1 ∑︁
+𝐻 ≃𝐹 =
+𝑔𝑑 𝑔𝑇𝑑 ,
+(6)
+|𝐷 |
+𝑑 ∈𝐷
+
+where 𝐷 is the sample dataset.
+The term 𝑓1 (𝑥) − 𝑓2 (𝑥) represents the difference between
+two experts. However, it is input-specific and hard to be measured. What’s more, difference of experts in a well-trained
+MoE model should be similar. Thus we approximate this
+term as:
+(𝑓1 (𝑥) − 𝑓2 (𝑥))𝑇 𝐻 (𝑓1 (𝑥) − 𝑓2 (𝑥))
+≃(𝑓1 (𝑥) − 𝑓2 (𝑥))𝑇 𝑑𝑖𝑎𝑔(𝐹 ) (𝑓1 (𝑥) − 𝑓2 (𝑥)) ∝
+
+∑︁
+
+𝑑𝑖𝑎𝑔(𝐹 )
+(7)
+
+Finally, given a threshold 𝑇 , only one expert will be activated
+if the Hessian and weight score in this layer satisfy:
+∑︁
+(1 − 𝛼) 2 ×
+𝑑𝑖𝑎𝑔(𝐹 ) ≤ 𝑇 ,
+(8)
+where 𝑑𝑖𝑎𝑔(𝐹 ) denotes the diagonal elements of 𝐹 . The value
+of 𝑇 is uniformly applied across all layers in the MoE model.
+The specific value of 𝑇 is determined by identifying the
+optimal balance on a validation set, where it minimizes the
+
+average number of expert activations without compromising
+the model’s accuracy. Compared with score-based adaptive
+gating [11] that only takes 𝛼 into account, our sensitivitybased gating considers the layer importance and allows for
+higher single expert activation ratios without compromising
+accuracy.
+4.3
+
+Adaptive Expert Prefetching
+
+Expert prefetching can significantly mitigate on-demand
+loading overheads by overlapping the communication latency with computation of MoE and attention blocks. Meanwhile, the prefetching efficiency relies highly on the prediction accuracy of next layer’s expert selection.
+As depicted in figure 5, AdapMoE utilizes the gate functions from the subsequent layer directly for predictive prefetching. The key to this adaptive prefetching is the high similarity
+in activations across layers, as established in Observation 2
+from Section 3.
+Furthermore, the activations are indicative of the expert selections not only for the immediate next layer but potentially
+for the next two/three layers. AdapMoE predicts potentially
+selected experts for the subsequent layers, incorporating
+adaptive gating into predictions. If the experts needed by the
+next layer are already cached in the GPU memory, AdapMoE
+preemptively fetches experts required for subsequent layers,
+extending beyond the immediate next.
+However, one important question still reamains: How do
+we prefetch the experts for the first layer? Given that the
+first layer lacks preceding layers from which to infer gating
+information, previous works, such as Pre-gated MoE, are
+constrained to on-demand loading these experts. Here we
+introduce an auxiliary predictive layer specifically designed
+to estimate the gating for the first layer’s expert selection
+with the last layer activation of the previous token. This
+predictive layer is trained to minimize the divergence between its predictions and the actual gating decisions of the
+first layer, thereby allowing for a more efficient prefetching
+strategy that can potentially reduce latency significantly.
+
+Table 1. Notations used for the DP formulation.
+
+4.4.1 Variable Definition. The notations of the DP formulation are defined in table 1. Among these variables, 𝑇
+is predetermined by the hardware configuration, 𝛼 and 𝛽
+are determined by offline profiling, 𝑡 is the optimization target. The function 𝑓𝑖𝑡 , representing the on-demand loading
+frequency for each layer under different cache sizes, can be
+quantified through these variables. The details of how 𝑓𝑖𝑡 is
+calculated will be introduced in the following section.
+
+Variable
+Meaning
+𝑇
+Total expert cache size
+𝐿
+Number of model layers
+𝑁
+Number of experts per layer
+𝑡𝑖
+Expert cache size of layer i
+𝛼𝑖
+Single expert gating probability
+𝛽𝑖
+Prefetching accuracy of layer i
+On-demand loading quantities
+𝑓𝑖,𝑡
+of layer i under cache size t
+
+Let 𝐷 𝐾𝐿 denote the Kullback-Leibler(KL) divergence, 𝐴𝑙𝑎𝑠𝑡
+represents the activations from the last layer of the previous
+token, 𝐴 𝑓 𝑖𝑟𝑠𝑡 denote the activations from the first layer of
+the current token, and 𝐺 𝑓 𝑖𝑟𝑠𝑡 be the gate function for the first
+layer, 𝐺 𝑝𝑟𝑒 be the predictive gate. The loss 𝐿 is computed as
+follows:
+
+4.4.2 On-demand Loading Quantification. In this section, we use the Mixtral MoE model to analyze the representation of on-demand loading costs, which will select 2
+experts from 8 experts per layer.
+First, we calculate the probability of hitting the cache 𝑝ℎ𝑖𝑡
+of a specified expert. Due to the expert similarity between
+successive tokens is not significant, we can simplify the
+calculation of 𝑝ℎ𝑖𝑡 by directly relating it to the cache size
+allocated for each expert.
+𝑝ℎ𝑖𝑡 =
+
+𝑡𝑖
+𝑁
+
+(10)
+
+𝐿 = 𝐷 𝐾𝐿 (𝑠𝑜 𝑓 𝑡𝑚𝑎𝑥 (𝐺 𝑓 𝑖𝑟𝑠𝑡 (𝐴 𝑓 𝑖𝑟𝑠𝑡 )) [:,0:−1,:]
+||𝑠𝑜 𝑓 𝑡𝑚𝑎𝑥 (𝐺 𝑝𝑟𝑒 (𝐴𝑙𝑎𝑠𝑡 )) [:,1:,:] )
+
+(9)
+
+The training of this predictive gate is optional, providing flexibility based on resource availability computational
+constraints. Also, the training overhead for this gate is very
+samll, for the parameter count is only hidden_dim × expert_num. Experiments demonstrate that the predictive gate
+dedicated to the first layer’s expert selection, along with the
+reuse of gate functions in subsequent layers, both achieve
+high accuracy in prefetch, which will further elaborate in
+section 6.
+4.4
+
+Adaptive Expert Caching
+
+Expert caching is critical for MoE edge inference. By storing frequently selected experts in the GPU memory, expert
+caching can significantly reduce the on-demand loading overheads.
+However, due to adaptive expert gating and adaptive prefetching, the cache demands for experts across different layers
+can become unbalanced. On the one hand, layers that tend to
+select more experts require a larger cache footprint to store
+these experts in the GPU memory; On the other hand, layers
+with lower prefetching accuracy also require increased cache
+storage to accommodate potential misses, ensuring that subsequent computation will not be stalled by on-demand loading delays.
+In this section, we first quantify the on-demand loading
+overheads for each layer by analyzing tracing data, which
+encompasses metrics related to adaptive gating and prefetching. Then we formulate the cache size allocation problem
+as a knapsack problem. Finally, we employ a dynamic programming algorithm to find the optimal cache allocation
+strategies on given platforms.
+
+Similarly, the cache hit probability of two specified experts
+𝑖 −1
+can be represented as 𝑁𝑡×𝑖 ×𝑡
+(𝑁 −1) , the cache miss probability of
+−𝑡𝑖 −1)
+two specified experts can be represented as 𝑚𝑎𝑥 ( (𝑁 −𝑡𝑁𝑖 ×) ×(𝑁(𝑁−1)
+, 0).
+We then explore the on-demand loading costs based on
+the number of activated experts:
+When only one expert is required. The on-demand
+loading overhead occurs if there is a cache miss combined
+with incorrect prefetching. This cost is represented as:
+
+𝑓𝑖,𝑡1 = (1 −
+
+𝑡𝑖
+) × (1 − 𝛽𝑖 )
+𝑁
+
+(11)
+
+When two experts are required. This scenario introduces more complexity and can be broken down into several
+cases:
+• Both experts miss the cache and prefetching is incorrect: In this case, both experts need to be loaded
+on-demand, which significantly increases the loading
+overhead. The loading cost can be represented as:
+𝑓𝑖,𝑡2 = 2 × 𝑚𝑎𝑥 (
+
+(𝑁 − 𝑡𝑖 ) × (𝑁 − 𝑡𝑖 − 1)
+, 0) × (1 − 𝛽𝑖 ) (12)
+𝑁 × (𝑁 − 1)
+
+• Both experts miss the cache but prefetching is correct for one expert: Here, only one expert needs to be
+loaded on-demand. The on-demand loading costs can
+be represented as:
+𝑓𝑖,𝑡3 = 𝑚𝑎𝑥 (
+
+(𝑁 − 𝑡𝑖 ) × (𝑁 − 𝑡𝑖 − 1)
+, 0) × 𝛽𝑖
+𝑁 × (𝑁 − 1)
+
+(13)
+
+• One expert hits the cache but prefetching is incorrect: The on-demand loading cost for this case can
+be calculated by considering the probability that one
+specific expert is cached and the other is not, yet the
+
+prefetching inaccurately predicts the need for the second expert. The formula for this cost is the following.
+2 × (𝑁 − 𝑡𝑖 ) × 𝑡𝑖
+𝑓𝑖,𝑡4 =
+× (1 − 𝛽𝑖 )
+(14)
+𝑁 × (𝑁 − 1)
+Finally, the overall on-demand loading costs of layer i can
+be calculated as:
+𝑓𝑖,𝑡 = 𝛼𝑖 × 𝑓𝑖,𝑡1 + (1 − 𝛼𝑖 ) × (𝑓𝑖,𝑡2 + 𝑓𝑖,𝑡3 + 𝑓𝑖,𝑡4 )
+
+Expert B
+B
+
+Non-MoE
+
+Expert C
+
+C
+
+(a)
+Compute
+Communication
+
+Expert A B1
+B1
+
+B2
+
+B2
+B3
+
+B3
+C1
+
+On-demand Loading
+
+Non-MoE
+C2
+
+C1 C2 C3
+C3
+
+Prefetching
+
+(b)
+
+Figure 6. (a) Timeline of expert-wise scheduling; (b) timeline of tile-wise scheduling. Tile-wise scheduling enables
+to further overlap the computation and communication for
+better efficiency.
+
+(17)
+
+on-demand. By managing these tasks in parallel, the system ensures that computing resources are utilized effectively
+without waiting for data transfers to complete.
+To address the delay associated with the on-demand loading of experts, which cannot be processed until fully loaded
+into the GPU, our system employs a strategic tiling approach.
+As illustrated in Figure 6, this strategy involves dividing each
+expert into smaller tiles. Each tile is loaded and processed
+as soon as it becomes available, enabling computations to
+significantly overlap with data loading. This method effectively minimizes the delays typically caused by data transfers,
+thereby accelerating the overall computation process and
+enhancing system throughput.
+
+(18)
+
+6
+
+Experimental Results
+
+6.1
+
+Experiment setup
+
+𝑖
+
+Constraints. Constraint 17 means the sum of the cache
+sizes allocated to each layer must not exceed the total available cache size; Constraint 18 ensures Each 𝑡𝑖 must be nonnegative and cannot be greater than the total number of
+experts N at any layer.
+𝑡𝑖 ≤ 𝑇
+
+Expert A
+
+Communication
+
+(15)
+
+4.4.3 DP Formulation. The goal of adaptive caching in
+MoE inference is to optimize the values of 𝑡𝑖 for each layer.
+This optimization aims to minimize the total on-demand
+loading overheads while staying within the limits of the
+total cache size 𝑇 .
+The problem can be mathematically formulated as an optimization scenario where:
+Objective Function. Minimize the total expected ondemand loading cost, expressed as a sum of the individual
+costs 𝑓𝑖,𝑡𝑖 for each layer 𝑖.
+∑︁
+min
+𝑓𝑖,𝑡𝑖
+(16)
+
+𝐿
+∑︁
+
+Compute
+
+𝑖=1
+
+0 ≤ 𝑡𝑖 ≤ 𝑁
+
+∀𝑖
+
+This can be viewed as a knapsack problem and solved
+by dynamic programming. Define 𝐹 [𝑖] [ 𝑗] as the minimum
+on-demand loading cost achievable by considering the first 𝑖
+layers and using up to j units of expert cache. The aim is to
+compute 𝐹 [𝐿] [𝑇 ].
+We start with 𝐹 [0] [ 𝑗] = 0 and then for each layer 𝑖 ∈ [1, 𝐿]
+and for each possible cache capacity 𝑗 ∈ [0,𝑇 ], derive the
+optimal substructure of F as
+𝐹 [𝑖] [ 𝑗] = 𝑚𝑖𝑛𝑘 ≤ 𝑗 (𝐹 [𝑖 − 1] [ 𝑗 − 𝑘] + 𝑓𝑖,𝑘 )
+
+(19)
+
+To finalize the cache allocations, start from the last layer
+and total cache size, and trace back through each layer to determine the specific cache allocation that led to the minimum
+cost.
+
+5
+
+Models. We utilize Mixtral [9] as the baseline MoE for our
+evaluations, a widely-used open-source MoE model. We test
+the 8x7b and 8x22b models under different quantization configurations to demonstrate the scalability of AdapMoE under
+different model sizes.
+Datasets. We use two famous LLM benchmark datasets to
+evaluate the accuracy of adaptive gating, including MMLU
+[7] and ARC-Challenge [3]. Additionally, for testing generation speed, we sample prompts from the MT Bench [20] to
+create realistic usage scenarios.
+Platforms. We test the Mixtral-8x7b model on RTX 4090
+and A6000, and Mixtral-8x22b model on A6000. We test different sizes of total cached experts to demonstrate the scalability
+of AdapMoE.
+
+System Implementation
+
+The implementation of the AdapMoE system is architected
+to take full advantage of GPU resources, specifically utilizing
+CUDA streams for efficient overlap of memory operations
+and computation.
+The workflow, as outlined in Algorithm 1, begins by processing the experts that are already loaded into the GPU.
+It then efficiently handles experts that need to be loaded
+
+6.2
+
+Accuracy Comparison
+
+In this section, we quantify the impact of our adaptive gating
+mechanism on MoE’s model accuracy. We sample different
+threshold to get different single expert activation ratios. All
+the models are quantized into 4bit in the experiments. We
+test the model accuracy on two famous LLM benchmark
+datasets, MMLU and ARC-Challenge.
+
+Algorithm 1 AdapMoE System Workflow
+
+Score-Based
+
+Sensitivity-Based
+76.6
+76.4
+76.2
+
+69.0
+
+76.0
+68.5
+
+Score
+
+Score
+
+1: Data Structures:
+2: 𝐸 ← Set of required experts for the current layer
+3: 𝑟 ← Experts to prefetch for subsequent layers
+4: ℎ ← Activations
+5: end Data Structures
+
+69.5
+
+68.0
+
+75.8
+75.6
+75.4
+
+67.5
+75.2
+
+6:
+7: function ComputeStream
+8:
+𝐸, 𝑟 ← AdaptiveGates(ℎ)
+9:
+𝑡𝑜_𝑡𝑟𝑎𝑛𝑠 𝑓 𝑒𝑟 ← 𝐸.𝑖𝑛_𝐶𝑃𝑈 ∪ 𝑟
+10:
+Enqeue(transfer_queue, to_transfer)
+11:
+Notify(comm_stream)
+
+67.0
+
+75.0
+0.0
+
+0.1
+
+0.2
+
+0.3
+
+0.4
+
+0.5
+
+0.6
+
+0.0
+
+0.1
+
+0.2
+
+0.3
+
+0.4
+
+0.5
+
+Single Expert Selection Ratio
+
+Single Expert Selection Ratio
+
+(a) Mixtral 8x7b on MMLU
+
+(b) Mixtral 8x22b on MMLU
+
+61.0
+
+0.6
+
+63.0
+
+60.5
+
+62.5
+
+60.0
+62.0
+
+Score
+
+Score
+
+59.5
+59.0
+58.5
+
+61.5
+
+61.0
+
+58.0
+
+60.5
+
+57.5
+0.0
+
+0.1
+
+0.2
+
+0.3
+
+0.4
+
+0.5
+
+60.0
+
+0.0
+
+0.1
+
+0.2
+
+0.3
+
+0.4
+
+0.5
+
+Single Expert Selection Ratio
+
+Single Expert Selection Ratio
+
+(c) Mixtral 8x7b on ARC-C
+
+(d) Mixtral 8x22b on ARC-C
+
+Figure 7. Accuracy comparison between the adaptive
+sensitivity-based gating and the score-based gating for different MoE models and NLP benchmarks.
+
+Baseline Offloading
+
+Mixtral-Offloading
+
+Pre-gated MoE (Large
+Accuracy Degradation)
+
+AdapMoE w/o adap gating
+
+AdapMoE w/ adap gating
+0.8
+
+0.5
+
+0.7
+0.6
+
+0.4
+
+Latency
+
+0.5
+
+Latency
+
+Enqeue(compute_queue, 𝐸.𝑖𝑛_𝐺𝑃𝑈 )
+Enqeue(compute_queue, 𝐸.𝑖𝑛_𝐶𝑃𝑈 )
+ProcessQueue(compute_queue, activations)
+15: function CommStream
+16:
+while true do
+17:
+if NotEmpty(transfer_queue) then
+18:
+𝑒𝑥𝑝𝑒𝑟𝑡 ← Deqeue(𝑡𝑟𝑎𝑛𝑠 𝑓 𝑒𝑟 _𝑞𝑢𝑒𝑢𝑒)
+19:
+for all 𝑡𝑖𝑙𝑒 in 𝑒𝑥𝑝𝑒𝑟𝑡 do
+20:
+Transfer(tile)
+21:
+NotifyTile(tile)
+22: function ProcessQueue(queue,h)
+23:
+for all 𝑒𝑥𝑝𝑒𝑟𝑡 in 𝑞𝑢𝑒𝑢𝑒 do
+24:
+if 𝑒𝑥𝑝𝑒𝑟𝑡 in GPU then
+25:
+Compute(expert,h)
+26:
+else
+27:
+Split(expert)
+28:
+for all 𝑡𝑖𝑙𝑒 in 𝑒𝑥𝑝𝑒𝑟𝑡 do
+29:
+WaitForTile(tile)
+30:
+Compute(tile,h)
+31:
+𝑒𝑥𝑝𝑒𝑟𝑡 .𝑖𝑛_𝐺𝑃𝑈 = True
+12:
+13:
+14:
+
+0.3
+
+0.4
+0.3
+
+0.2
+
+0.2
+0.1
+0.1
+0.0
+
+64
+
+96
+
+128
+
+0.0
+
+160
+
+64
+
+96
+
+128
+
+#Cached Experts
+
+#Cached Experts
+
+(a) Mixtral 8x7b 4+2bit on 4090
+
+(b) Mixtral 8x7b 4bit on 4090
+
+0.7
+
+6.3
+
+Performance Comparison
+
+We evaluate our framework against baseline offloading algorithms, Mixtral-offloading1 and Pre-gated MoE. Baseline
+offloading algorithm will load/offload the whole layer as
+adopted in Deepspeed [13], Flexgen [16], etc. Pre-gated MoE
+1 Mixtral-offloading will not store all of the experts in CPU. We modify this
+
+configuration for fair comparison. The results of Mixtral-offloading in our
+experiments is 2x faster than its open-source version.
+
+1.6
+0.6
+
+1.4
+
+0.5
+
+1.2
+
+0.4
+
+1.0
+
+Latency
+
+Latency
+
+Figure 7 illustrates the model accuracy differences when
+employing score-based [11] versus sensitivity-based adaptive
+gating mechanisms under varying single expert activation
+ratios. Notably, sensitivity-based adaptive gating demonstrates a higher tolerance for increased single expert activation ratios without a corresponding decrease in accuracy.
+This robustness suggests that sensitivity-based gating more
+effectively leverages the most relevant experts, maintaining high performance even as the selection becomes more
+concentrated.
+
+0.3
+
+0.8
+0.6
+
+0.2
+0.4
+0.1
+0.0
+
+0.2
+
+64
+
+96
+
+128
+
+160
+
+0.0
+
+64
+
+96
+
+128
+
+#Cached Experts
+
+#Cached Experts
+
+(c) Mixtral 8x7b 4bit on A6000
+
+(d) Mixtral 8x22b 4bit on A6000
+
+Figure 8. Inference speed comparison between AdapMoE
+and the baselines for different quantization configurations,
+model sizes, cached experts sizes, and platforms.
+
+is the SOTA MoE inference mechanism. We implement its
+algorithm by modifying the structure of Mixtral to prefetch
+and select experts based on the activations from the previous layer. All the methods take LRU as its cache elimination
+algorithm.
+
+speedup
+1.25×
+1.22×
+1.29×
+1.22×
+1.27×
+1.36×
+
+0.9
+
+Score-based
+Sensitivity-based
+
+0.8
+
+0.8
+
+0.7
+Accuracy
+
+latency(s)
+0.392
+0.313
+0.322
+0.305
+0.321
+0.308
+0.288
+
+1.0
+
+0.6
+0.4
+
+0.6
+0.5
+0.4
+0.3
+
+0.2
+
+0.2
+0.1
+
+0.0
+0
+
+5
+
+10
+
+15
+20
+Layer
+(a)
+
+25
+
+0.0
+
+30
+
+0
+
+5
+
+10
+
+15
+20
+Layer
+(b)
+
+25
+
+30
+
+9
+8
+7
+Cache size
+
+Technique
+baseline
+basline+gating
+baseline+prefetch
+baseline+gating+cache
+baseline+prefetch+cache
+baseline+gating+prefetch
+all
+
+Single expert selection ratio
+
+Table 2. MoE inference speedup breakdown of proposed
+techniques.
+
+6
+5
+4
+3
+2
+1
+
+In our evaluations of AdapMoE, we conducted tests with
+and without the adaptive gating mechanism. The version
+without adaptive gating was configured to ensure identical
+output consistency with the baseline offloading and Mixtraloffloading. For the version equipped with adaptive gating, we
+choose a conservative single expert activation ratio of 24%.
+This setting was chosen to safeguard the model’s accuracy
+for fair comparison.
+The mixtral models are quantized into 4+2 bit and 4bit
+using hqq framework [2]. 4+2 bit will quantize the attention blocks into 4bit and MoE blocks into 2bit for efficient
+inference adopted by mixtral-offloading.
+As shown in figure 8, AdapMoE significantly reduces latency by an average 1.35× vs. Mixtral-Offloading. AdapMoE
+also exhibits comparable latency to Pre-gated MoE. The version of AdapMoE without adaptive gating matches the performance of Pre-gated MoE, while the version with gating
+consistently surpasses it, achieving better results without the
+need for additional finetuning or training. Compared with
+Pre-gated MoE, this performance improvement is largely due
+to the implementation of adaptive prefetching and caching
+strategies. These strategies will prefetch experts for the next
+two or three layers and allocate additional cache size to more
+crucial layers, optimizing resource use and minimizing latency.
+6.4
+
+Ablation Study
+
+We further explore how the components of our method contribute to the result. We take Mixtral-8x7b 4bit on 4090 with
+128 cached experts as an example and show the impact of
+the proposed speedup techniques on the per-token latency.
+The baseline technique is our modified version of Mixtraloffloading on our framework, which is 2× faster than its
+open-source version.
+As shown in table 2, each component of AdapMoE contributes to reducing the latency. The combined application
+of all techniques can lead to 1.36× speedup.
+
+0
+
+5
+
+10
+
+15
+
+Layer
+
+20
+
+25
+
+30
+
+(c)
+
+Figure 9. (a) Single expert selection ratios; (b) expert prefetch
+prediction accuracy of different layers; (c) expert cache allocation for different layers.
+6.5
+
+Discussions
+
+Sensitivity. Figure 9(a) presents the single expert activation
+ratios of score-based gating and sensitivity-based gating. Earlier layers are more sensitive to perturbation. In comparison
+to score-based adaptive gating, AdapMoE tends to activate
+more experts in early layers, which contributes to enhanced
+overall accuracy.
+Prefetch accuracy. Figure 9(b) illustrates the prefetching
+accuracy across different layers. The prediction for the first
+layer is derived from the trained predictive gates, while for
+subsequent layers, it is based on the reuse of existing gates.
+The graph demonstrates that most layers maintain a high
+level of expert activation prediction accuracy, achieving rates
+around 90%.
+Cache allocation. Figure 9(c) shows the cache size allocation for Mixtral 8x7b with total cache size 128. More experts
+of the early layers will be stored in GPU memory, for the
+early layers are more sensitivity and harder to be prefetched.
+
+7
+
+Conclusion
+
+This paper introduces AdapMoE, an algorithm-system codesign for scalable and efficient MoE inference on edge devices. By implementing adaptive expert gating, prefetching,
+and caching within a unified framework, AdapMoE addresses
+the challenges of high latency and substantial on-demand
+loading overheads commonly associated with MoE models.
+Our evaluations across various hardware platforms demonstrate that AdapMoE not only reduces the activation of experts by 25% but also achieves a 1.35x speedup in inference
+times, all without compromising the accuracy of the model.
+
+References
+[1] Reza Yazdani Aminabadi, Samyam Rajbhandari, Ammar Ahmad Awan,
+Cheng Li, Du Li, Elton Zheng, Olatunji Ruwase, Shaden Smith, Minjia
+Zhang, Jeff Rasley, et al. 2022. Deepspeed-inference: enabling efficient
+inference of transformer models at unprecedented scale. In SC22: International Conference for High Performance Computing, Networking,
+Storage and Analysis. IEEE, 1–15.
+[2] Hicham Badri and Appu Shaji. 2023. Half-Quadratic Quantization of
+Large Machine Learning Models. https://mobiusml.github.io/hqq_
+blog/
+[3] Peter Clark, Isaac Cowhey, Oren Etzioni, Tushar Khot, Ashish Sabharwal, Carissa Schoenick, and Oyvind Tafjord. 2018. Think you have
+solved question answering? try arc, the ai2 reasoning challenge. arXiv
+preprint arXiv:1803.05457 (2018).
+[4] Marta R Costa-jussà, James Cross, Onur Çelebi, Maha Elbayad, Kenneth
+Heafield, Kevin Heffernan, Elahe Kalbassi, Janice Lam, Daniel Licht,
+Jean Maillard, et al. 2022. No language left behind: Scaling humancentered machine translation. arXiv preprint arXiv:2207.04672 (2022).
+[5] Artyom Eliseev and Denis Mazur. 2023.
+Fast inference of
+mixture-of-experts language models with offloading. arXiv preprint
+arXiv:2312.17238 (2023).
+[6] William Fedus, Barret Zoph, and Noam Shazeer. 2022. Switch transformers: Scaling to trillion parameter models with simple and efficient
+sparsity. Journal of Machine Learning Research 23, 120 (2022), 1–39.
+[7] Dan Hendrycks, Collin Burns, Steven Basart, Andy Zou, Mantas
+Mazeika, Dawn Song, and Jacob Steinhardt. 2020. Measuring massive
+multitask language understanding. arXiv preprint arXiv:2009.03300
+(2020).
+[8] Ranggi Hwang, Jianyu Wei, Shijie Cao, Changho Hwang, Xiaohu Tang,
+Ting Cao, Mao Yang, and Minsoo Rhu. 2023. Pre-gated MoE: An
+Algorithm-System Co-Design for Fast and Scalable Mixture-of-Expert
+Inference. arXiv preprint arXiv:2308.12066 (2023).
+[9] Albert Q Jiang, Alexandre Sablayrolles, Antoine Roux, Arthur Mensch,
+Blanche Savary, Chris Bamford, Devendra Singh Chaplot, Diego de las
+Casas, Emma Bou Hanna, Florian Bressand, et al. 2024. Mixtral of
+experts. arXiv preprint arXiv:2401.04088 (2024).
+[10] Sehoon Kim, Coleman Hooper, Amir Gholami, Zhen Dong, Xiuyu Li,
+Sheng Shen, Michael W Mahoney, and Kurt Keutzer. 2023. Squeezellm:
+Dense-and-sparse quantization. arXiv preprint arXiv:2306.07629 (2023).
+[11] Jiamin Li, Qiang Su, Yitao Yang, Yimin Jiang, Cong Wang, and Hong Xu.
+2023. Adaptive gating in mixture-of-experts based language models.
+arXiv preprint arXiv:2310.07188 (2023).
+[12] Saeed Masoudnia and Reza Ebrahimpour. 2014. Mixture of experts: a
+literature survey. Artificial Intelligence Review 42 (2014), 275–293.
+[13] Samyam Rajbhandari, Olatunji Ruwase, Jeff Rasley, Shaden Smith,
+and Yuxiong He. 2021. Zero-infinity: Breaking the gpu memory wall
+for extreme scale deep learning. In Proceedings of the international
+conference for high performance computing, networking, storage and
+analysis. 1–14.
+[14] Jie Ren, Samyam Rajbhandari, Reza Yazdani Aminabadi, Olatunji
+Ruwase, Shuangyan Yang, Minjia Zhang, Dong Li, and Yuxiong He.
+2021. {Zero-offload}: Democratizing {billion-scale} model training. In
+2021 USENIX Annual Technical Conference (USENIX ATC 21). 551–564.
+[15] Noam Shazeer, Azalia Mirhoseini, Krzysztof Maziarz, Andy Davis,
+Quoc Le, Geoffrey Hinton, and Jeff Dean. 2017. Outrageously large
+neural networks: The sparsely-gated mixture-of-experts layer. arXiv
+preprint arXiv:1701.06538 (2017).
+[16] Ying Sheng, Lianmin Zheng, Binhang Yuan, Zhuohan Li, Max Ryabinin,
+Beidi Chen, Percy Liang, Christopher Ré, Ion Stoica, and Ce Zhang.
+2023. Flexgen: High-throughput generative inference of large language
+models with a single gpu. In International Conference on Machine
+Learning. PMLR, 31094–31116.
+[17] Leyang Xue, Yao Fu, Zhan Lu, Luo Mai, and Mahesh Marina. 2024.
+MoE-Infinity: Activation-Aware Expert Offloading for Efficient MoE
+
+Serving. arXiv preprint arXiv:2401.14361 (2024).
+[18] Zhewei Yao, Amir Gholami, Kurt Keutzer, and Michael W Mahoney.
+2020. Pyhessian: Neural networks through the lens of the hessian. In
+2020 IEEE international conference on big data (Big data). IEEE, 581–590.
+[19] Rongjie Yi, Liwei Guo, Shiyun Wei, Ao Zhou, Shangguang Wang, and
+Mengwei Xu. 2023. Edgemoe: Fast on-device inference of moe-based
+large language models. arXiv preprint arXiv:2308.14352 (2023).
+[20] Lianmin Zheng, Wei-Lin Chiang, Ying Sheng, Siyuan Zhuang, Zhanghao Wu, Yonghao Zhuang, Zi Lin, Zhuohan Li, Dacheng Li, Eric Xing,
+et al. 2024. Judging llm-as-a-judge with mt-bench and chatbot arena.
+Advances in Neural Information Processing Systems 36 (2024).
+
+

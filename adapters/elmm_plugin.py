@@ -130,6 +130,29 @@ class ELMMConfig:
     enable_pred_cache: bool = False
     # PredCache LRU fallback weight (λ)
     pred_cache_lru_weight: float = 10.0
+    # --- MoE-Infinity Integration ---
+    # Enable request-level historical-trace prefetching.
+    enable_moe_infinity: bool = False
+    moe_infinity_horizon: int = 2
+    moe_infinity_history_size: int = 64
+    moe_infinity_max_k: int = 4
+    moe_infinity_min_similarity: float = 0.05
+    # --- AdapMoE Integration ---
+    # Enable AdapMoE mode (sensitivity gating + adaptive prefetch/cache alloc).
+    enable_adapmoe: bool = False
+    # Enable sensitivity-based gating adaptation.
+    enable_adapmoe_gating: bool = True
+    # Enable DP-based adaptive cache allocation.
+    enable_adapmoe_cache_alloc: bool = True
+    # AdapMoE prefetch width bounds.
+    adapmoe_min_k: int = 1
+    adapmoe_max_k: int = 3
+    # Prefetch horizon for next-layer prediction (current implementation uses +1).
+    adapmoe_horizon: int = 2
+    # Target single-expert ratio for adaptive gating.
+    adapmoe_single_ratio: float = 0.24
+    # Warmup steps before enabling adaptive gating.
+    adapmoe_gating_warmup: int = 128
     # SACR alpha/beta/gamma weights
     sacr_alpha: float = 0.3
     sacr_beta: float = 0.2
@@ -525,6 +548,13 @@ class ELMMManager:
         self._briskmoe_dipp: Optional[Any] = None  # DraftInformedPrioritizedPreloader
         # PredCache manager (forward-looking eviction + prefetch)
         self._pred_cache: Optional[Any] = None  # PredictiveExpertCacheManager
+        # AdapMoE components
+        self._adapmoe_gating: Optional[Any] = None  # SensitivityAdaptiveGating
+        self._adapmoe_prefetcher: Optional[Any] = None  # AdaptiveGatingPrefetcher
+        # Per-layer EMA of observed single-expert ratio
+        self._adapmoe_single_ratio_ema: dict[str, float] = {}
+        # MoE-Infinity request-level predictor
+        self._moe_infinity_prefetcher: Optional[Any] = None  # SequenceTracePrefetcher
         # Accept/Reject tracker (shared by SACR)
         self._briskmoe_tracker: Optional[Any] = None  # AcceptRejectTracker
         # Mapping layer_name → layer_id (int) for SACR/ELP
@@ -845,6 +875,54 @@ class ELMMManager:
                   f"(num_experts={max_experts_pc}, top_k={sample_top_k}, "
                   f"λ={pc_config.lru_fallback_weight})",
                   file=sys.stderr, flush=True)
+
+        if self.config.enable_adapmoe:
+            from adapters.adapmoe_gating import AdapMoEGatingConfig, SensitivityAdaptiveGating
+            from adapters.adapmoe_prefetch import AdapMoEConfig, AdaptiveGatingPrefetcher
+
+            num_layers = len(self._layer_caches)
+            gating_cfg = AdapMoEGatingConfig(
+                target_single_ratio=self.config.adapmoe_single_ratio,
+                warmup_steps=self.config.adapmoe_gating_warmup,
+            )
+            prefetch_cfg = AdapMoEConfig(
+                min_prefetch_k=max(1, self.config.adapmoe_min_k),
+                max_prefetch_k=max(self.config.adapmoe_min_k, self.config.adapmoe_max_k),
+                horizon=max(1, self.config.adapmoe_horizon),
+            )
+            self._adapmoe_gating = SensitivityAdaptiveGating(
+                num_layers=num_layers,
+                config=gating_cfg,
+            )
+            self._adapmoe_prefetcher = AdaptiveGatingPrefetcher(config=prefetch_cfg)
+            print(
+                f"[ELMM] AdapMoE enabled (gating={self.config.enable_adapmoe_gating}, "
+                f"cache_alloc={self.config.enable_adapmoe_cache_alloc}, "
+                f"single_ratio={self.config.adapmoe_single_ratio}, "
+                f"k=[{self.config.adapmoe_min_k},{self.config.adapmoe_max_k}], "
+                f"horizon={self.config.adapmoe_horizon})",
+                file=sys.stderr, flush=True,
+            )
+
+        if self.config.enable_moe_infinity:
+            from adapters.moe_infinity_prefetch import MoEInfinityConfig, SequenceTracePrefetcher
+
+            mi_cfg = MoEInfinityConfig(
+                history_size=max(1, self.config.moe_infinity_history_size),
+                horizon=max(1, self.config.moe_infinity_horizon),
+                max_prefetch_k=max(1, self.config.moe_infinity_max_k),
+                min_similarity=max(0.0, self.config.moe_infinity_min_similarity),
+            )
+            self._moe_infinity_prefetcher = SequenceTracePrefetcher(
+                num_layers=len(self._layer_caches),
+                config=mi_cfg,
+            )
+            print(
+                f"[ELMM] MoE-Infinity enabled (history={mi_cfg.history_size}, "
+                f"horizon={mi_cfg.horizon}, max_k={mi_cfg.max_prefetch_k}, "
+                f"min_sim={mi_cfg.min_similarity:.3f})",
+                file=sys.stderr, flush=True,
+            )
 
         # Check if any layer has quant aux pools
         has_aux = any(c.has_aux_pools for c in self._layer_caches.values())
@@ -1339,6 +1417,100 @@ class ELMMManager:
             hidden_states=hidden_states,
             router_logits=router_logits,
         )
+
+        # AdapMoE sensitivity-based adaptive gating.
+        if self.config.enable_adapmoe and self.config.enable_adapmoe_gating and self._adapmoe_gating is not None:
+            layer_id_for_gating = self._layer_name_to_id.get(layer_name, 0)
+            topk_weights, topk_ids, single_ratio_obs = self._adapmoe_gating.apply(
+                layer_id=layer_id_for_gating,
+                layer_rank=self._layer_index.get(layer_name, layer_id_for_gating),
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+            )
+            old_sr = self._adapmoe_single_ratio_ema.get(layer_name, single_ratio_obs)
+            self._adapmoe_single_ratio_ema[layer_name] = 0.9 * old_sr + 0.1 * single_ratio_obs
+
+        # MoE-Infinity request-level historical trace prefetch.
+        if (
+            self.config.enable_moe_infinity
+            and self._moe_infinity_prefetcher is not None
+            and layer_name in self._layer_index
+        ):
+            idx = self._layer_index[layer_name]
+            horizon = max(1, self.config.moe_infinity_horizon)
+            targets = []
+            for hop in range(1, horizon + 1):
+                t_idx = idx + hop
+                if t_idx >= len(self._ordered_layers):
+                    break
+                t_name = self._ordered_layers[t_idx]
+                t_cache = self._layer_caches.get(t_name)
+                t_meta = self._layer_meta.get(t_name)
+                if t_cache is None or t_meta is None:
+                    continue
+                targets.append(
+                    {
+                        "layer_id": self._layer_name_to_id.get(t_name, t_idx),
+                        "layer_name": t_name,
+                        "cached": set(t_cache._slot_map.keys()),
+                        "num_experts": int(t_meta.get("num_experts", len(t_cache._slot_map))),
+                        "width_cap": max(1, self.config.moe_infinity_max_k),
+                    }
+                )
+
+            if targets:
+                plan = self._moe_infinity_prefetcher.plan_prefetch(
+                    current_layer_id=self._layer_name_to_id.get(layer_name, idx),
+                    topk_ids=topk_ids,
+                    targets=targets,
+                )
+                for t in targets:
+                    t_layer_id = int(t["layer_id"])
+                    eids = plan.get(t_layer_id)
+                    if eids:
+                        self.prefetch_experts(t["layer_name"], eids)
+
+        # AdapMoE adaptive prefetch using current-layer routing confidence.
+        if (
+            self.config.enable_adapmoe
+            and self._adapmoe_prefetcher is not None
+            and layer_name in self._layer_index
+        ):
+            idx = self._layer_index[layer_name]
+            horizon = max(1, self.config.adapmoe_horizon)
+            targets = []
+            for hop in range(1, horizon + 1):
+                t_idx = idx + hop
+                if t_idx >= len(self._ordered_layers):
+                    break
+                t_name = self._ordered_layers[t_idx]
+                t_cache = self._layer_caches.get(t_name)
+                t_meta = self._layer_meta.get(t_name)
+                if t_cache is None or t_meta is None:
+                    continue
+                targets.append(
+                    {
+                        "layer_id": self._layer_name_to_id.get(t_name, t_idx),
+                        "layer_name": t_name,
+                        "cached": set(t_cache._slot_map.keys()),
+                        "num_experts": int(t_meta.get("num_experts", len(t_cache._slot_map))),
+                        "width_cap": max(1, self.config.adapmoe_max_k),
+                    }
+                )
+
+            if targets:
+                plan = self._adapmoe_prefetcher.plan_prefetch(
+                    current_layer_id=self._layer_name_to_id.get(layer_name, idx),
+                    topk_ids=topk_ids,
+                    router_logits=router_logits,
+                    hidden_states=hidden_states,
+                    targets=targets,
+                )
+                for t in targets:
+                    t_layer_id = int(t["layer_id"])
+                    eids = plan.get(t_layer_id)
+                    if eids:
+                        self.prefetch_experts(t["layer_name"], eids)
 
         # --- Phase 3: Cache lookup + scratchpad fill ---
         self._maybe_profile_end(p_tok)
@@ -2134,11 +2306,60 @@ class ELMMManager:
         num_layers = len(self._layer_caches)
         min_slots = max(1, int(total_slots * self.config.min_slot_fraction))
 
-        # Compute weight per layer: higher hit rate → more valuable → more slots
-        # Inverse logic: layers with LOW hit rate benefit MORE from extra slots.
-        # But empirically, layers that already have high hit rates should keep
-        # their slots. We use miss_rate as the allocation weight: layers with
-        # more misses need more cache capacity.
+        if self.config.enable_adapmoe and self.config.enable_adapmoe_cache_alloc:
+            try:
+                from adapters.adapmoe_cache_alloc import (
+                    LayerRuntimeStat,
+                    allocate_slots_dp,
+                )
+
+                pacc = (
+                    self._prefetch_hits / self._prefetch_total
+                    if self._prefetch_total > 0
+                    else 0.0
+                )
+                layer_stats = []
+                for name, cache in self._layer_caches.items():
+                    miss_rate = 1.0 - self._hit_rate_ema.get(name, cache.hit_rate)
+                    single_ratio = self._adapmoe_single_ratio_ema.get(name, 0.0)
+                    layer_stats.append(
+                        LayerRuntimeStat(
+                            name=name,
+                            capacity=cache._w13_pool.shape[0],
+                            miss_rate=max(0.0, min(1.0, miss_rate)),
+                            prefetch_acc=max(0.0, min(1.0, pacc)),
+                            single_ratio=max(0.0, min(1.0, single_ratio)),
+                        )
+                    )
+
+                dp_alloc = allocate_slots_dp(
+                    stats=layer_stats,
+                    total_slots=total_slots,
+                    min_slots_per_layer=min_slots,
+                )
+
+                resized = 0
+                for name, cache in self._layer_caches.items():
+                    target = int(dp_alloc.get(name, cache._max_slots))
+                    if target != cache._max_slots:
+                        cache.resize(target)
+                        self._layer_cache_dirty[name] = True
+                        resized += 1
+
+                if resized > 0:
+                    import sys
+                    print(
+                        f"[ELMM] AdapMoE DP cache realloc: {resized}/{num_layers} layers resized "
+                        f"(total={total_slots} slots)",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                return
+            except Exception:
+                # Fall back to default ELMM rebalancing on any allocation error.
+                pass
+
+        # Compute weight per layer: higher miss-rate → more slots.
         weights = {}
         for name, ema in self._hit_rate_ema.items():
             # miss_rate as weight — layers that miss more need more capacity

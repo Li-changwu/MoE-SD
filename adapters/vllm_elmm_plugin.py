@@ -77,6 +77,7 @@ def register():
         enable_cuda_graph = os.environ.get("ELMM_CUDA_GRAPH", "1") == "1"
         enable_shared_parallel = os.environ.get("ELMM_SHARED_PARALLEL", "1") == "1"
         enable_oracle_prefetch = os.environ.get("ELMM_ORACLE_PREFETCH", "1") == "1"
+        enable_draft_hook = os.environ.get("ELMM_DRAFT_HOOK", "1") == "1"
         # BriskMoE integration
         enable_sacr = os.environ.get("BRISKMOE_SACR", "0") == "1"
         enable_elp = os.environ.get("BRISKMOE_ELP", "0") == "1"
@@ -86,6 +87,19 @@ def register():
         sacr_alpha = float(os.environ.get("BRISKMOE_SACR_ALPHA", "0.3"))
         sacr_beta = float(os.environ.get("BRISKMOE_SACR_BETA", "0.2"))
         sacr_gamma = float(os.environ.get("BRISKMOE_SACR_GAMMA", "0.5"))
+        enable_adapmoe = os.environ.get("BRISKMOE_ADAPMOE", "0") == "1"
+        enable_adapmoe_gating = os.environ.get("BRISKMOE_ADAPMOE_GATING", "1") == "1"
+        enable_adapmoe_cache_alloc = os.environ.get("BRISKMOE_ADAPMOE_CACHE_ALLOC", "1") == "1"
+        adapmoe_min_k = int(os.environ.get("BRISKMOE_ADAPMOE_MIN_K", "1"))
+        adapmoe_max_k = int(os.environ.get("BRISKMOE_ADAPMOE_MAX_K", "3"))
+        adapmoe_horizon = int(os.environ.get("BRISKMOE_ADAPMOE_HORIZON", "2"))
+        adapmoe_single_ratio = float(os.environ.get("BRISKMOE_ADAPMOE_SINGLE_RATIO", "0.24"))
+        adapmoe_gating_warmup = int(os.environ.get("BRISKMOE_ADAPMOE_GATING_WARMUP", "128"))
+        enable_moe_infinity = os.environ.get("BRISKMOE_MOE_INFINITY", "0") == "1"
+        moe_infinity_horizon = int(os.environ.get("BRISKMOE_MOE_INFINITY_HORIZON", "2"))
+        moe_infinity_history = int(os.environ.get("BRISKMOE_MOE_INFINITY_HISTORY", "64"))
+        moe_infinity_max_k = int(os.environ.get("BRISKMOE_MOE_INFINITY_MAX_K", "4"))
+        moe_infinity_min_sim = float(os.environ.get("BRISKMOE_MOE_INFINITY_MIN_SIM", "0.05"))
         elp_pin_ratio = float(os.environ.get("BRISKMOE_ELP_PIN_RATIO", "0.7"))
         elp_promotion_threshold = int(os.environ.get("BRISKMOE_ELP_THRESHOLD", "5"))
         elp_demotion_window = int(os.environ.get("BRISKMOE_ELP_DEMOTION", "50"))
@@ -119,6 +133,19 @@ def register():
             sacr_alpha=sacr_alpha,
             sacr_beta=sacr_beta,
             sacr_gamma=sacr_gamma,
+                enable_adapmoe=enable_adapmoe,
+                enable_adapmoe_gating=enable_adapmoe_gating,
+                enable_adapmoe_cache_alloc=enable_adapmoe_cache_alloc,
+                adapmoe_min_k=adapmoe_min_k,
+                adapmoe_max_k=adapmoe_max_k,
+                adapmoe_horizon=adapmoe_horizon,
+                adapmoe_single_ratio=adapmoe_single_ratio,
+                adapmoe_gating_warmup=adapmoe_gating_warmup,
+            enable_moe_infinity=enable_moe_infinity,
+            moe_infinity_horizon=moe_infinity_horizon,
+            moe_infinity_history_size=moe_infinity_history,
+            moe_infinity_max_k=moe_infinity_max_k,
+            moe_infinity_min_similarity=moe_infinity_min_sim,
             elp_pin_ratio=elp_pin_ratio,
             elp_promotion_threshold=elp_promotion_threshold,
             elp_demotion_window=elp_demotion_window,
@@ -150,8 +177,9 @@ def register():
                   f"(total: {self.model_runner.model_memory_usage / 1024**3:.2f} GiB)",
                   file=sys.stderr, flush=True)
 
-        # Install draft-guided prefetch hook (if prefetch enabled)
-        if enable_prefetch:
+        # Install draft-guided prefetch hook when explicitly enabled.
+        # Keep it independent from other prefetch paths for fair ablation.
+        if enable_prefetch and enable_draft_hook and not enable_moe_infinity:
             from adapters.draft_prefetch_hook import install_draft_prefetch
             pfh = install_draft_prefetch(
                 __import__("adapters.elmm_plugin", fromlist=["get_elmm_manager"]).get_elmm_manager()
