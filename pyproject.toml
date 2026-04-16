@@ -16,6 +16,7 @@ dependencies = [
 
 [project.entry-points."vllm.general_plugins"]
 elmm = "adapters.vllm_elmm_plugin:register"
+moeinf_official = "adapters.vllm_moeinf_official_plugin:register"
 
 [tool.setuptools]
 packages = ["adapters"]

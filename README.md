@@ -89,6 +89,21 @@ BriskMoE is controlled entirely via environment variables:
 | `BRISKMOE_SACR` | `0` | Enable SACR (Speculation-Aware Cache Replacement) |
 | `BRISKMOE_ELP` | `0` | Enable ELP (Expert Lifecycle Partitioning) |
 
+### Pure vLLM MoE-Infinity (No ELMM)
+
+This repository also provides a pure-vLLM MoE-Infinity official-like mode that
+does not depend on ELMM cache/offload internals.
+
+- Plugin entry: `adapters/vllm_moeinf_official_plugin.py`
+- Core logic: `adapters/vllm_moeinf_official.py`
+- Runner script: `scripts/bench_moeinf_official_vllm.sh`
+
+```bash
+bash scripts/bench_moeinf_official_vllm.sh
+```
+
+By default, results are written to `results/moeinf_official_vllm_smoke/`.
+
 ### 1. Single Run with `bench_humaneval_runner.py`
 
 The core benchmark runner feeds HumanEval prompts through `vllm.LLM.generate()` and measures per-prompt latency.
