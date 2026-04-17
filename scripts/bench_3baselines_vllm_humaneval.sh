@@ -36,9 +36,6 @@ run_case() {
   local name="$1"
   shift
   local out_dir="$BASE_OUT/$name"
-  local case_output_len="${CASE_OUTPUT_LEN:-$OUTPUT_LEN}"
-  local case_num_prompts="${CASE_NUM_PROMPTS:-$NUM_PROMPTS}"
-  local case_warmup_prompts="${CASE_WARMUP_PROMPTS:-$WARMUP_PROMPTS}"
   mkdir -p "$out_dir"
 
   echo "============================================================"
@@ -77,9 +74,9 @@ run_case() {
   "$PYTHON_BIN" scripts/bench_humaneval_runner.py \
     --model "$MODEL_PATH" \
     --dataset "$DATASET" \
-    --output-len "$case_output_len" \
-    --num-prompts "$case_num_prompts" \
-    --warmup-prompts "$case_warmup_prompts" \
+    --output-len "$OUTPUT_LEN" \
+    --num-prompts "$NUM_PROMPTS" \
+    --warmup-prompts "$WARMUP_PROMPTS" \
     --gpu-memory-utilization "$GPU_MEM_UTIL" \
     --cpu-offload-gb "$CPU_OFFLOAD_GB" \
     --max-model-len "$MAX_MODEL_LEN" \
@@ -98,19 +95,10 @@ run_case "baseline_lru_offload45"
 run_case "moeinf_official_vllm" \
   env \
   VLLM_PLUGINS=moeinf_official \
-  MOE_INFINITY_OFFICIAL_VLLM=1 \
-  MOE_INFINITY_PREFETCH_TOPK=4 \
-  MOE_INFINITY_PREFETCH_PER_LAYER=1 \
-  MOE_INFINITY_PREFETCH_MAX_LAYERS=2 \
-  MOE_INFINITY_PREFETCH_SCORE_THRESHOLD=1e-3
-
-# Baseline 3: Config from latest MoE-Infinity stride=16 run
-run_case "adapmoe_official_vllm" \
-  env \
-  CASE_OUTPUT_LEN=128 \
-  CASE_NUM_PROMPTS=20 \
-  CASE_WARMUP_PROMPTS=3 \
-  VLLM_PLUGINS=moeinf_official \
+  ELMM_PREFETCH=0 \
+  ADAPMOE_ENABLE=0 \
+  MOE_INFINITY_ENABLE=0 \
+  SPMOE_ENABLE=0 \
   MOE_INFINITY_OFFICIAL_VLLM=1 \
   MOE_INFINITY_PREFETCH_TOPK=4 \
   MOE_INFINITY_PREFETCH_PER_LAYER=1 \
@@ -120,6 +108,18 @@ run_case "adapmoe_official_vllm" \
   MOE_INFINITY_TRACE_UPDATE_STRIDE=16 \
   MOE_INFINITY_PREDICT_UPDATE_STRIDE=16 \
   MOE_INFINITY_SHADOW_POLICY_STRIDE=16
+
+# Baseline 3: AdapMoE official-like on pure vLLM
+# NOTE: "adopmoe" in request is treated as "adapmoe".
+run_case "adapmoe_official_vllm" \
+  env \
+  VLLM_PLUGINS=adapmoe_official \
+  ADAPMOE_OFFICIAL_VLLM=1 \
+  ADAPMOE_DP_ENABLE=1 \
+  ADAPMOE_ADAPTGATE=1 \
+  ADAPMOE_PREFETCH_HORIZON=1 \
+  ADAPMOE_PREFETCH_TOPK=2 \
+  ADAPMOE_THRESHOLD_BASE=0.005
 
 "$PYTHON_BIN" - << 'PY'
 import json
