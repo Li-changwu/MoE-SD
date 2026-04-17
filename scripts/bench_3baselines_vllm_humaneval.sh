@@ -31,6 +31,53 @@ NUM_SPEC_TOKENS="${NUM_SPEC_TOKENS:-3}"
 CUDA_DEVICES="${CUDA_VISIBLE_DEVICES:-1}"
 
 BASE_OUT="${BASE_OUT:-results}"
+RUN_MOEINF_STRIDE16_20X128="${RUN_MOEINF_STRIDE16_20X128:-0}"
+
+# Recorded config (2026-04-17): MoE-Infinity official-like, 20x128, stride=16.
+run_moeinf_stride16_20x128() {
+  local name="moeinf_official_vllm_stride16_20x128"
+  local out_dir="$BASE_OUT/$name"
+  mkdir -p "$out_dir"
+
+  echo "============================================================"
+  echo "Running $name"
+  echo "Output: $out_dir"
+  echo "============================================================"
+
+  CUDA_VISIBLE_DEVICES="$CUDA_DEVICES" \
+  VLLM_ENABLE_V1_MULTIPROCESSING=0 \
+  PYTHONUNBUFFERED=1 \
+  PYTHONPATH=. \
+  VLLM_PLUGINS=moeinf_official \
+  ELMM_PREFETCH=0 \
+  ADAPMOE_ENABLE=0 \
+  MOE_INFINITY_ENABLE=0 \
+  SPMOE_ENABLE=0 \
+  MOE_INFINITY_OFFICIAL_VLLM=1 \
+  MOE_INFINITY_PREFETCH_TOPK=4 \
+  MOE_INFINITY_PREFETCH_PER_LAYER=1 \
+  MOE_INFINITY_PREFETCH_MAX_LAYERS=2 \
+  MOE_INFINITY_PREFETCH_SCORE_THRESHOLD=1e-3 \
+  MOE_INFINITY_LOG_INTERVAL=0 \
+  MOE_INFINITY_TRACE_UPDATE_STRIDE=16 \
+  MOE_INFINITY_PREDICT_UPDATE_STRIDE=16 \
+  MOE_INFINITY_SHADOW_POLICY_STRIDE=16 \
+  "$PYTHON_BIN" scripts/bench_humaneval_runner.py \
+    --model "$MODEL_PATH" \
+    --dataset "$DATASET" \
+    --output-len 128 \
+    --num-prompts 20 \
+    --warmup-prompts 3 \
+    --gpu-memory-utilization "$GPU_MEM_UTIL" \
+    --cpu-offload-gb "$CPU_OFFLOAD_GB" \
+    --max-model-len "$MAX_MODEL_LEN" \
+    --enforce-eager \
+    --trust-remote-code \
+    --dtype bfloat16 \
+    --output-json "$out_dir/result.json" \
+    --speculative-config "{\"method\":\"eagle3\",\"model\":\"$SPEC_MODEL_PATH\",\"num_speculative_tokens\":$NUM_SPEC_TOKENS}" \
+    > "$out_dir/bench.log" 2>&1
+}
 
 run_case() {
   local name="$1"
@@ -112,6 +159,10 @@ run_case "adapmoe_official_vllm" \
   ADAPMOE_PREFETCH_HORIZON=1 \
   ADAPMOE_PREFETCH_TOPK=2 \
   ADAPMOE_THRESHOLD_BASE=0.005
+
+if [[ "$RUN_MOEINF_STRIDE16_20X128" == "1" ]]; then
+  run_moeinf_stride16_20x128
+fi
 
 "$PYTHON_BIN" - << 'PY'
 import json
