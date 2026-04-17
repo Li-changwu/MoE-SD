@@ -224,11 +224,35 @@ def register():
                   f"(total: {self.model_runner.model_memory_usage / 1024**3:.2f} GiB)",
                   file=sys.stderr, flush=True)
 
-        # Install draft-guided prefetch hook (if prefetch enabled)
-        # SP-MoE baseline mode: use SP-MoE's cross-model predictor + cutoff
-        # instead of BriskMoE's DIPP/PredCache/locality-based prefetch.
+        # Install baseline strategy hooks (exclusive modes).
+        enable_adapmoe = os.environ.get("ADAPMOE_ENABLE", "0") == "1"
+        enable_moe_infinity = os.environ.get("MOE_INFINITY_ENABLE", "0") == "1"
         enable_spmoe = os.environ.get("SPMOE_ENABLE", "0") == "1"
-        if enable_spmoe:
+        if sum(int(x) for x in [enable_adapmoe, enable_moe_infinity, enable_spmoe]) > 1:
+            print("[ELMM] WARNING: multiple baseline modes enabled; precedence: "
+                  "AdapMoE > MoE-Infinity > SP-MoE", file=sys.stderr, flush=True)
+
+        if enable_adapmoe:
+            from adapters.adapmoe_baseline import activate_adapmoe
+            adap = activate_adapmoe(
+                __import__("adapters.elmm_plugin", fromlist=["get_elmm_manager"]).get_elmm_manager()
+            )
+            if adap:
+                print(f"[ELMM] AdapMoE baseline mode activated", file=sys.stderr, flush=True)
+            else:
+                print(f"[ELMM] AdapMoE activation failed, falling back to default",
+                      file=sys.stderr, flush=True)
+        elif enable_moe_infinity:
+            from adapters.moe_infinity_baseline import activate_moe_infinity
+            moeinf = activate_moe_infinity(
+                __import__("adapters.elmm_plugin", fromlist=["get_elmm_manager"]).get_elmm_manager()
+            )
+            if moeinf:
+                print(f"[ELMM] MoE-Infinity baseline mode activated", file=sys.stderr, flush=True)
+            else:
+                print(f"[ELMM] MoE-Infinity activation failed, falling back to default",
+                      file=sys.stderr, flush=True)
+        elif enable_spmoe:
             from adapters.spmoe_baseline import activate_spmoe
             spmoe = activate_spmoe(
                 __import__("adapters.elmm_plugin", fromlist=["get_elmm_manager"]).get_elmm_manager()

@@ -741,6 +741,17 @@ class ELMMManager:
         self._unified_current_decision: Optional[Any] = None
         # --- v3.1 Overflow Controller (C1-C6) ---
         self._overflow_controller: Optional[Any] = None  # OverflowController
+        # --- External Baseline Hooks (AdapMoE / MoE-Infinity) ---
+        # Optional callback: on_access_batch(layer_id, unique_eids)
+        self._external_on_access_batch: Optional[Any] = None
+        # Optional callback:
+        #   select_victim(layer_name, layer_id, cache, unique_set, incoming_eid)
+        self._external_select_victim: Optional[Any] = None
+        # Optional callback:
+        #   select_victims_batch(layer_name, layer_id, cache, unique_set, incoming_eids)
+        self._external_select_victims_batch: Optional[Any] = None
+        # Optional callback: on_load_expert(layer_id, expert_id)
+        self._external_on_load_expert: Optional[Any] = None
 
     # -----------------------------------------------------------------------
     # Installation
@@ -2197,6 +2208,13 @@ class ELMMManager:
                 use_pred_cache = self._pred_cache is not None
                 layer_id = self._layer_name_to_id.get(layer_name, 0)
 
+                # External baseline callback: observe accesses once per layer step.
+                if self._external_on_access_batch is not None:
+                    try:
+                        self._external_on_access_batch(layer_id, unique_list)
+                    except Exception:
+                        pass
+
                 # BriskMoE: record accesses for ALL touched experts (hits+misses)
                 # Fused batch call — single loop over unique_list instead of two
                 if use_sacr:
@@ -2219,8 +2237,32 @@ class ELMMManager:
                     # via EMA — no extra .tolist() needed since we reuse unique_list)
                     self._pred_cache.update_predictions_from_flat(layer_id, unique_list)
 
+                external_victim_plan = None
+                if (
+                    self._external_select_victims_batch is not None
+                    and miss_eids
+                    and not cache._free_slots
+                ):
+                    try:
+                        external_victim_plan = self._external_select_victims_batch(
+                            layer_name, layer_id, cache, unique_set, miss_eids
+                        )
+                    except Exception:
+                        external_victim_plan = None
+
                 for eid in miss_eids:
-                    if use_briskmoe and not cache._free_slots and eid not in cache._slot_map:
+                    if (self._external_select_victim is not None
+                            and not cache._free_slots
+                            and eid not in cache._slot_map):
+                        victim = None
+                        if isinstance(external_victim_plan, dict):
+                            victim = external_victim_plan.get(eid)
+                        elif victim is None:
+                            victim = self._external_select_victim(
+                                layer_name, layer_id, cache, unique_set, eid
+                            )
+                        new_slot, _evicted = cache.alloc_slot_with_victim(eid, victim)
+                    elif use_briskmoe and not cache._free_slots and eid not in cache._slot_map:
                         if use_pred_cache:
                             # PredCache: LRU with demand-aware protection.
                             # Iterate cache in LRU order, skip experts with
@@ -2298,6 +2340,11 @@ class ELMMManager:
                             if b13 is not None:
                                 b13.copy_(module.w13_bias[eid], non_blocking=True)
                                 b2.copy_(module.w2_bias[eid], non_blocking=True)
+                    if self._external_on_load_expert is not None:
+                        try:
+                            self._external_on_load_expert(layer_id, eid)
+                        except Exception:
+                            pass
                     miss_slots.append(new_slot)
 
                 # BriskMoE: periodic ELP rebalance
@@ -3194,7 +3241,7 @@ class ELMMManager:
         # rate), because the evicted expert is typically still needed.
         # This forces TASER slow path, costing ~3.5ms per dirty layer.
         # Skip prefetch entirely when cache is full.
-        if not cache._free_slots:
+        if not cache._free_slots and self._external_select_victim is None:
             return
 
         stream = self._prefetch_stream or torch.cuda.current_stream()
@@ -3209,6 +3256,19 @@ class ELMMManager:
         remap_tbl = self._layer_remap.get(layer_name)
         use_briskmoe = self._briskmoe_sacr is not None
         layer_id = self._layer_name_to_id.get(layer_name, 0)
+        external_prefetch_plan = None
+        if (
+            self._external_select_victims_batch is not None
+            and not cache._free_slots
+        ):
+            incoming = [eid for eid in expert_ids if eid not in cache._slot_map]
+            if incoming:
+                try:
+                    external_prefetch_plan = self._external_select_victims_batch(
+                        layer_name, layer_id, cache, set(), incoming
+                    )
+                except Exception:
+                    external_prefetch_plan = None
         with torch.cuda.stream(stream):
             for eid in expert_ids:
                 if cache.contains(eid):
@@ -3216,6 +3276,42 @@ class ELMMManager:
                 # If cache is full, eviction will happen — update remap
                 # so TASER's has_unmapped check detects the evicted expert.
                 if not cache._free_slots and eid not in cache._slot_map:
+                    if self._external_select_victim is not None:
+                        victim = None
+                        if isinstance(external_prefetch_plan, dict):
+                            victim = external_prefetch_plan.get(eid)
+                        elif victim is None:
+                            victim = self._external_select_victim(
+                                layer_name,
+                                layer_id,
+                                cache,
+                                set(),
+                                eid,
+                            )
+                        if victim is not None and remap_tbl is not None:
+                            remap_tbl[victim] = -1
+                        slot, _evicted = cache.alloc_slot_with_victim(eid, victim)
+                        pool_w13, pool_w2 = cache.get_slot_tensors(slot)
+                        pool_w13.copy_(module.w13_weight[eid], non_blocking=True)
+                        pool_w2.copy_(module.w2_weight[eid], non_blocking=True)
+                        if cache.has_aux_pools:
+                            s13, s2 = cache.get_slot_scale_tensors(slot)
+                            b13, b2 = cache.get_slot_bias_tensors(slot)
+                            if s13 is not None:
+                                s13.copy_(module.w13_weight_scale[eid], non_blocking=True)
+                                s2.copy_(module.w2_weight_scale[eid], non_blocking=True)
+                            if b13 is not None:
+                                b13.copy_(module.w13_bias[eid], non_blocking=True)
+                                b2.copy_(module.w2_bias[eid], non_blocking=True)
+                        if remap_tbl is not None:
+                            remap_tbl[eid] = slot
+                        if self._external_on_load_expert is not None:
+                            try:
+                                self._external_on_load_expert(layer_id, eid)
+                            except Exception:
+                                pass
+                        self._pending_prefetch[layer_name].add(eid)
+                        continue
                     if use_briskmoe:
                         # BriskMoE victim selection for prefetch eviction
                         if self._briskmoe_elp is not None:
@@ -3256,6 +3352,11 @@ class ELMMManager:
                 # Update remap for newly loaded expert
                 if remap_tbl is not None:
                     remap_tbl[eid] = slot
+                if self._external_on_load_expert is not None:
+                    try:
+                        self._external_on_load_expert(layer_id, eid)
+                    except Exception:
+                        pass
                 self._pending_prefetch[layer_name].add(eid)
         self._prefetch_in_flight = True
         # Mark layer dirty so TASER validates.  LDR flag enables the
